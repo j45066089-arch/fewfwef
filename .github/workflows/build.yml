@@ -1,0 +1,36 @@
+name: Build VCamUSB
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    
+    - name: Setup Theos
+      run: |
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+    
+    - name: Install ldid
+      run: |
+        brew install ldid
+    
+    - name: Build tweak
+      run: |
+        cd tweak
+        make clean
+        make package FINALPACKAGE=1
+    
+    - name: Upload package
+      uses: actions/upload-artifact@v3
+      with:
+        name: vcaminject-deb
+        path: tweak/packages/*.deb

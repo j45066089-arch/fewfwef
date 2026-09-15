@@ -1,0 +1,43 @@
+# Theos build artifacts
+.theos/
+packages/
+*.deb
+obj/
+.debmake
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+syslog*.txt
+
+# Test files
+server/test_src_*.mp4
+server/frame_*.png
+server/*.png
+
+# Analysis artifacts
+ghidra_*/
+analysis_*/
+artifacts_*/
+deb_extract*/
+lordvcam_*/
+*.json
+*_ANALYSIS.md
+*_REPORT.md
+*_UEBERGABE.md
