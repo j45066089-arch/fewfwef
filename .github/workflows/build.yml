@@ -12,7 +12,7 @@ jobs:
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Setup Theos
       run: |
@@ -27,10 +27,10 @@ jobs:
       run: |
         cd tweak
         make clean
-        make package FINALPACKAGE=1
+        make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
     
     - name: Upload package
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: vcaminject-deb
         path: tweak/packages/*.deb
