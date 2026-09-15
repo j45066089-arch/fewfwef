@@ -1,0 +1,9 @@
+Package: com.shosh.vcaminject
+Name: VCamUSB
+Version: 2.0.0
+Architecture: iphoneos-arm64
+Description: PC video stream as iPhone camera (mediaserverd injection)
+Maintainer: Maurice
+Author: Maurice
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
