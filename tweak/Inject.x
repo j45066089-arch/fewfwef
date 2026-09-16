@@ -737,79 +737,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     return ok;
 }
 
-static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
-    atomic_fetch_add(&g_buildCalls, 1);
-    atomic_fetch_add(&g_passthroughAttempts, 1);
-
-    BOOL testMode = atomic_load(&g_modeTestPattern) != 0;
-    BOOL wrapOrigMode = atomic_load(&g_modeWrapOrig) != 0;
-
-    CVPixelBufferRef px = NULL;
-    if (wrapOrigMode) {
-        // Astras Test A: Original-PixelBuffer, neuer SampleBuffer
-        CVPixelBufferRef origPB = original ? CMSampleBufferGetImageBuffer(original) : NULL;
-        if (origPB) px = CVPixelBufferRetain(origPB);
-        atomic_fetch_add(&g_testPatternUsed, 1);
-    } else if (testMode) {
-        if (!g_testPattern) g_testPattern = makeTestPattern();
-        if (g_testPattern) px = CVPixelBufferRetain(g_testPattern);
-        atomic_fetch_add(&g_testPatternUsed, 1);
-    } else {
-        // Decoder-Buffer direkt durchreichen (Passthrough, KEIN Range-Shift!)
-        [g_frameLock lock];
-        if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
-        [g_frameLock unlock];
-    }
-    if (!px) {
-        atomic_fetch_add(&g_passthroughOrig, 1);
-        return NULL;
-    }
-
-    // SICHERHEITS-CHECK: Größe + Pixelformat müssen zum Original passen,
-    // sonst crasht die App (TikTok/WebRTC verwerfen oder brechen bei Mismatch).
-    CVPixelBufferRef origPB = original ? CMSampleBufferGetImageBuffer(original) : NULL;
-    if (origPB) {
-        size_t ow = CVPixelBufferGetWidth(origPB);
-        size_t oh = CVPixelBufferGetHeight(origPB);
-        OSType ofmt = CVPixelBufferGetPixelFormatType(origPB);
-        size_t dw = CVPixelBufferGetWidth(px);
-        size_t dh = CVPixelBufferGetHeight(px);
-        OSType dfmt = CVPixelBufferGetPixelFormatType(px);
-        if (ow != dw || oh != dh || ofmt != dfmt) {
-            // Mismatch: NICHT ersetzen — Original durchlassen
-            CVPixelBufferRelease(px);
-            atomic_fetch_add(&g_swapSizeMismatch, 1);
-            return NULL;
-        }
-    }
-
-    // Format-Description aus dem tatsächlichen Decoder-Buffer (nicht raten)
-    CMFormatDescriptionRef fmt = NULL;
-    OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, px, &fmt);
-    if (st != noErr || !fmt) {
-        CVPixelBufferRelease(px);
-        atomic_fetch_add(&g_passthroughFailures, 1);
-        return NULL;
-    }
-
-    // Timing vom Original übernehmen
-    CMSampleTimingInfo timing = {
-        .duration = original ? CMSampleBufferGetDuration(original) : CMTimeMake(1, 30),
-        .presentationTimeStamp = original ? CMSampleBufferGetPresentationTimeStamp(original) : CMTimeMake((int64_t)atomic_load(&g_swapCount), 30),
-        .decodeTimeStamp = kCMTimeInvalid,
-    };
-    CMSampleBufferRef sb = NULL;
-    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, px, fmt, &timing, &sb);
-    CFRelease(fmt);
-    CVPixelBufferRelease(px);
-    if (st != noErr || !sb) {
-        atomic_fetch_add(&g_passthroughFailures, 1);
-        return NULL;
-    }
-    atomic_fetch_add(&g_swapCount, 1);
-    atomic_fetch_add(&g_passthroughCreated, 1);
-    return sb;
-}
+// buildSwapSampleBuffer entfernt — nutzen jetzt swapPixelsInPlace (LordVCAM-Stil)
 
 // ---------------------------------------------------------------- Handoff-Diagnose
 static _Atomic int64_t g_handoffDumped = 0;
@@ -825,65 +753,10 @@ static _Atomic int64_t d_replFullRange = 0;
 static char d_hookClass[128] = {0};
 static char d_hookEncoding[128] = {0};
 
-__attribute__((unused)) static void dumpHandoff(id sampleBuffer, CMSampleBufferRef replacement) {
-    if (atomic_load(&g_handoffDumped)) return;
-
-    CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
-    if (!orig) return;
-
-    CVPixelBufferRef oImg = CMSampleBufferGetImageBuffer(orig);
-    CMBlockBufferRef oData = CMSampleBufferGetDataBuffer(orig);
-    CMFormatDescriptionRef oFmt = CMSampleBufferGetFormatDescription(orig);
-    IOSurfaceRef oSurf = oImg ? CVPixelBufferGetIOSurface(oImg) : NULL;
-
-    atomic_store(&d_origValid, CMSampleBufferIsValid(orig));
-    atomic_store(&d_origReady, CMSampleBufferDataIsReady(orig));
-    atomic_store(&d_origSamples, (int64_t)CMSampleBufferGetNumSamples(orig));
-    atomic_store(&d_origHasImg, oImg != NULL);
-    atomic_store(&d_origHasData, oData != NULL);
-    atomic_store(&d_origHasFmt, oFmt != NULL);
-    atomic_store(&d_origSurfId, oSurf ? (int64_t)IOSurfaceGetID(oSurf) : 0);
-    atomic_store(&d_origSurfSeed, oSurf ? (int64_t)IOSurfaceGetSeed(oSurf) : 0);
-    if (oFmt) {
-        CFDictionaryRef ext = CMFormatDescriptionGetExtensions(oFmt);
-        atomic_store(&d_origFullRange,
-            ext && CFDictionaryGetValue(ext, kCMFormatDescriptionExtension_FullRangeVideo) ? 1 : 0);
-    }
-
-    CVPixelBufferRef rImg = replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL;
-    CMBlockBufferRef rData = replacement ? CMSampleBufferGetDataBuffer(replacement) : NULL;
-    CMFormatDescriptionRef rFmt = replacement ? CMSampleBufferGetFormatDescription(replacement) : NULL;
-    IOSurfaceRef rSurf = rImg ? CVPixelBufferGetIOSurface(rImg) : NULL;
-
-    atomic_store(&d_replValid, replacement ? CMSampleBufferIsValid(replacement) : 0);
-    atomic_store(&d_replReady, replacement ? CMSampleBufferDataIsReady(replacement) : 0);
-    atomic_store(&d_replSamples, replacement ? (int64_t)CMSampleBufferGetNumSamples(replacement) : -1);
-    atomic_store(&d_replHasImg, rImg != NULL);
-    atomic_store(&d_replHasData, rData != NULL);
-    atomic_store(&d_replHasFmt, rFmt != NULL);
-    atomic_store(&d_replSurfId, rSurf ? (int64_t)IOSurfaceGetID(rSurf) : 0);
-    atomic_store(&d_replSurfSeed, rSurf ? (int64_t)IOSurfaceGetSeed(rSurf) : 0);
-    if (rFmt) {
-        CFDictionaryRef ext = CMFormatDescriptionGetExtensions(rFmt);
-        atomic_store(&d_replFullRange,
-            ext && CFDictionaryGetValue(ext, kCMFormatDescriptionExtension_FullRangeVideo) ? 1 : 0);
-    }
-
-    atomic_store(&g_handoffDumped, 1);
-}
+// dumpHandoff entfernt — war unused
 
 static _Atomic int64_t g_hookClassChecked = 0;
-__attribute__((unused)) static void dumpHookClass(id self) {
-    if (atomic_load(&g_hookClassChecked)) return;
-    snprintf(d_hookClass, sizeof(d_hookClass), "%s", object_getClassName(self));
-    Class cls = object_getClass(self);
-    Method m = class_getInstanceMethod(cls, @selector(emitSampleBuffer:));
-    if (m) {
-        const char *enc = method_getTypeEncoding(m);
-        if (enc) snprintf(d_hookEncoding, sizeof(d_hookEncoding), "%s", enc);
-    }
-    atomic_store(&g_hookClassChecked, 1);
-}
+// dumpHookClass entfernt — war unused
 // FigCaptureClientSessionMonitor-Hooks entfernt (feuern nie, laut Verifikation)
 
 static _Atomic int64_t g_origPixelFormat = 0;
@@ -1049,90 +922,7 @@ static void maybeResetPhotoGuard(void) {
     }
 }
 
-static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original, CVPixelBufferRef pcFrame) {
-    size_t w = CVPixelBufferGetWidth(pcFrame);
-    size_t h = CVPixelBufferGetHeight(pcFrame);
-    OSType fmt = CVPixelBufferGetPixelFormatType(pcFrame);
-    
-    CVPixelBufferRef newBuf = NULL;
-    NSDictionary *attrs = @{
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (id)kCVPixelBufferMetalCompatibilityKey: @YES
-    };
-    CVReturn cvr = CVPixelBufferCreate(NULL, w, h, fmt, (__bridge CFDictionaryRef)attrs, &newBuf);
-    if (cvr != kCVReturnSuccess || !newBuf) return NULL;
-    
-    CVPixelBufferLockBaseAddress(pcFrame, kCVPixelBufferLock_ReadOnly);
-    CVPixelBufferLockBaseAddress(newBuf, 0);
-    
-    size_t planes = CVPixelBufferGetPlaneCount(pcFrame);
-    if (planes >= 2) {
-        for (size_t p = 0; p < planes; p++) {
-            void *src = CVPixelBufferGetBaseAddressOfPlane(pcFrame, p);
-            void *dst = CVPixelBufferGetBaseAddressOfPlane(newBuf, p);
-            size_t srcStride = CVPixelBufferGetBytesPerRowOfPlane(pcFrame, p);
-            size_t dstStride = CVPixelBufferGetBytesPerRowOfPlane(newBuf, p);
-            size_t planeH = CVPixelBufferGetHeightOfPlane(pcFrame, p);
-            size_t copyW = (srcStride < dstStride) ? srcStride : dstStride;
-            for (size_t row = 0; row < planeH; row++) {
-                memcpy(dst + row * dstStride, src + row * srcStride, copyW);
-            }
-        }
-    } else {
-        void *src = CVPixelBufferGetBaseAddress(pcFrame);
-        void *dst = CVPixelBufferGetBaseAddress(newBuf);
-        size_t srcStride = CVPixelBufferGetBytesPerRow(pcFrame);
-        size_t dstStride = CVPixelBufferGetBytesPerRow(newBuf);
-        size_t copyW = (srcStride < dstStride) ? srcStride : dstStride;
-        for (size_t row = 0; row < h; row++) {
-            memcpy(dst + row * dstStride, src + row * srcStride, copyW);
-        }
-    }
-    
-    CVPixelBufferUnlockBaseAddress(newBuf, 0);
-    CVPixelBufferUnlockBaseAddress(pcFrame, kCVPixelBufferLock_ReadOnly);
-    
-    CMSampleBufferRef newSB = NULL;
-    CMSampleTimingInfo timing;
-    CMSampleBufferGetSampleTimingInfo(original, 0, &timing);
-    
-    CMVideoFormatDescriptionRef fmt_desc = NULL;
-    CMVideoFormatDescriptionCreateForImageBuffer(NULL, newBuf, &fmt_desc);
-    if (!fmt_desc) {
-        CVPixelBufferRelease(newBuf);
-        return NULL;
-    }
-    
-    CMSampleBufferCreateReadyWithImageBuffer(NULL, newBuf, fmt_desc, &timing, &newSB);
-    CFRelease(fmt_desc);
-    CVPixelBufferRelease(newBuf);
-    
-    // Sample-Attachments kopieren (direkt via CFDictionary)
-    if (newSB) {
-        CFArrayRef origAttachments = CMSampleBufferGetSampleAttachmentsArray(original, false);
-        if (origAttachments && CFArrayGetCount(origAttachments) > 0) {
-            CFArrayRef newAttachments = CMSampleBufferGetSampleAttachmentsArray(newSB, true);
-            if (newAttachments && CFArrayGetCount(newAttachments) > 0) {
-                CFDictionaryRef origDict = (CFDictionaryRef)CFArrayGetValueAtIndex(origAttachments, 0);
-                CFMutableDictionaryRef newDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(newAttachments, 0);
-                if (origDict && newDict && CFDictionaryGetCount(origDict) > 0) {
-                    // Kopiere alle Keys/Values
-                    CFIndex count = CFDictionaryGetCount(origDict);
-                    const void **keys = (const void **)malloc(count * sizeof(void *));
-                    const void **values = (const void **)malloc(count * sizeof(void *));
-                    CFDictionaryGetKeysAndValues(origDict, keys, values);
-                    for (CFIndex i = 0; i < count; i++) {
-                        CFDictionarySetValue(newDict, keys[i], values[i]);
-                    }
-                    free(keys);
-                    free(values);
-                }
-            }
-        }
-    }
-    
-    return newSB;
-}
+// buildReplacementSampleBuffer entfernt — nutzen jetzt swapPixelsInPlace (LordVCAM-Stil)
 
 %hook AVCapturePhotoOutput
 - (void)capturePhotoWithSettings:(id)settings delegate:(id)delegate {
