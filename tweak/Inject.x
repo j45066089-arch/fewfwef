@@ -79,6 +79,7 @@ static _Atomic int g_modeFigEmit = 0;
 static _Atomic int g_modeFigSend = 0;
 static _Atomic uint64_t g_figEmitReplacements = 0;
 static _Atomic uint64_t g_figSendReplacements = 0;
+static _Atomic uint64_t g_photoSwaps = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -883,35 +884,7 @@ __attribute__((unused)) static void dumpHookClass(id self) {
     }
     atomic_store(&g_hookClassChecked, 1);
 }
-%hook FigCaptureClientSessionMonitor
-- (void)emitSampleBuffer:(id)sampleBuffer {
-    atomic_fetch_add(&g_emitCalls, 1);
-    if (atomic_load(&g_modeFigEmit)) {
-        CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
-        if (fake) {
-            atomic_fetch_add(&g_figEmitReplacements, 1);
-            %orig((__bridge id)fake);
-            CFRelease(fake);
-            return;
-        }
-    }
-    %orig;
-}
-
-- (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
-    atomic_fetch_add(&g_sendCalls, 1);
-    if (atomic_load(&g_modeFigSend)) {
-        CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
-        if (fake) {
-            atomic_fetch_add(&g_figSendReplacements, 1);
-            %orig((__bridge id)fake);
-            CFRelease(fake);
-            return;
-        }
-    }
-    %orig;
-}
-%end
+// FigCaptureClientSessionMonitor-Hooks entfernt (feuern nie, laut Verifikation)
 
 static _Atomic int64_t g_origPixelFormat = 0;
 static _Atomic int64_t g_origWidth = 0;
@@ -1134,10 +1107,20 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     CFRelease(fmt_desc);
     CVPixelBufferRelease(newBuf);
     
+    // Sample-Attachments kopieren
     if (newSB) {
-        CFDictionaryRef origAttach = CMGetAttachment(original, kCMSampleBufferAttachmentKey_SampleAttachments, NULL);
-        if (origAttach) {
-            CMSetAttachment(newSB, kCMSampleBufferAttachmentKey_SampleAttachments, origAttach, kCMAttachmentMode_ShouldPropagate);
+        CFArrayRef origAttachments = CMSampleBufferGetSampleAttachmentsArray(original, false);
+        if (origAttachments && CFArrayGetCount(origAttachments) > 0) {
+            CFArrayRef newAttachments = CMSampleBufferGetSampleAttachmentsArray(newSB, true);
+            if (newAttachments && CFArrayGetCount(newAttachments) > 0) {
+                CFDictionaryRef origDict = (CFDictionaryRef)CFArrayGetValueAtIndex(origAttachments, 0);
+                CFMutableDictionaryRef newDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(newAttachments, 0);
+                if (origDict && newDict) {
+                    CFDictionaryApplyFunction(origDict, ^(const void *key, const void *value, void *context) {
+                        CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
+                    }, newDict);
+                }
+            }
         }
     }
     
@@ -1157,8 +1140,8 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
 %hook BWPhotoEncoderNode
-- (void)renderSampleBuffer:(opaqueCMSampleBuffer *)sbuf forInput:(id)input {
-    if (!atomic_load(&g_enabled) || !atomic_load(&g_photoInProgress)) {
+- (void)renderSampleBuffer:(CMSampleBufferRef)sbuf forInput:(id)input {
+    if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
         %orig;
         return;
     }
