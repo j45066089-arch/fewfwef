@@ -192,12 +192,91 @@ class SourceReader:
         self.last_read = 0.0
         self.paused = False
         self._lock = threading.Lock()
+        # ffmpeg-dshow-Pfad (cv2 kann manche Virtual-Cameras nicht öffnen)
+        self.ffcam = None
+        self.ffcam_name = None
+        self.ffcam_framesz = WIDTH * HEIGHT * 3
+        self.ffcam_restarts = 0
+        self.fflog = None
+        self.fflog_path = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_dshow.log")
+
+    def _open_ffcam(self, name):
+        """ffmpeg-dshow-Kamera als BGR-Frame-Quelle (Fallback/Ergänzung zu cv2)."""
+        try:
+            self.fflog = open(self.fflog_path, "ab")
+        except OSError:
+            self.fflog = None
+        creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+               "-f", "dshow", "-i", f"video={name}",
+               "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-s", f"{WIDTH}x{HEIGHT}", "-r", "30", "-"]
+        try:
+            self.ffcam = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=self.fflog if self.fflog is not None
+                else subprocess.DEVNULL, creationflags=creationflags)
+        except Exception as e:
+            log.error("ffcam start failed: %s", e)
+            self.ffcam = None
+
+    def _read_ffcam_frame(self):
+        """Liest ein 1920x1080-BGR-Frame aus dem ffmpeg-Stdout (blockierend,
+        aber mit Timeout-Schutz über select)."""
+        if self.ffcam is None:
+            return None
+        if self.ffcam.poll() is not None:
+            # Selbstheilung, max 3 Neustarts
+            rc = self.ffcam.returncode
+            log.warning("ffcam (dshow) beendet rc=%s — Neustart", rc)
+            self.ffcam_restarts += 1
+            if self.ffcam_restarts > 3 or self.ffcam_name is None:
+                self.ffcam = None
+                return None
+            self._open_ffcam(self.ffcam_name)
+            return None
+        if self.ffcam.stdout is None:
+            return None
+        try:
+            import select as _select
+            if os.name == "nt":
+                # Windows: select funktioniert nicht auf Pipes → poll mit peek
+                self.ffcam.stdout.flush()
+            else:
+                r, _, _ = _select.select([self.ffcam.stdout], [], [], 2.0)
+                if not r:
+                    return None
+            chunk = self.ffcam.stdout.read(self.ffcam_framesz)
+        except Exception as e:
+            log.error("ffcam read failed: %s", e)
+            return None
+        if not chunk or len(chunk) != self.ffcam_framesz:
+            # Teil-Frame: Rest abwarten
+            try:
+                while chunk and len(chunk) < self.ffcam_framesz:
+                    more = self.ffcam.stdout.read(self.ffcam_framesz - len(chunk))
+                    if not more:
+                        break
+                    chunk += more
+            except Exception:
+                pass
+        if not chunk or len(chunk) != self.ffcam_framesz:
+            return None
+        import numpy as np
+        return np.frombuffer(chunk, dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)
 
     def open(self, src_type, payload):
         with self._lock:
             self.close()
             self.paused = False
             if src_type == "cam":
+                # cv2 kann manche Virtual-Cameras (z.B. OBS Virtual Camera) gar
+                # nicht öffnen → immer über ffmpeg-dshow gehen, wenn der Payload
+                # KEIN numerischer Index ist (Name). Namen werden per ffmpeg gelesen.
+                if not payload.isdigit():
+                    self.ffcam_name = payload
+                    self.ffcam_restarts = 0
+                    self._open_ffcam(payload)
+                    return
                 idx = int(payload)
                 # Robust: wenn der angeforderte Index nicht lesbar ist,
                 # alle Indizes 0..7 scannen und den ersten nutzbaren nehmen.
@@ -232,6 +311,22 @@ class SourceReader:
         if self.cap:
             self.cap.release()
             self.cap = None
+        if self.ffcam is not None:
+            try:
+                self.ffcam.terminate()
+                self.ffcam.wait(timeout=3)
+            except Exception:
+                try:
+                    self.ffcam.kill()
+                except Exception:
+                    pass
+            self.ffcam = None
+        if self.fflog:
+            try:
+                self.fflog.close()
+            except Exception:
+                pass
+            self.fflog = None
         self.image_frame = None
 
     def read_frame(self):
@@ -250,6 +345,9 @@ class SourceReader:
 
             if self.image_frame is not None:
                 return self.image_frame.copy()
+            # ffmpeg-dshow-Kamera (Name-basiert)
+            if self.ffcam is not None:
+                return self._read_ffcam_frame()
             if not self.cap:
                 return None
 
@@ -819,6 +917,8 @@ async def main():
         "src_error": None,
     }
     logbuf = LogBuf()
+    # FIX: Race behoben — Kamera-Name wird NICHT mehr auf Index gemappt.
+    # SourceReader.open() kann Namen direkt (ffmpeg-dshow); numerische IDs bleiben.
     pipeline = Pipeline(state, logbuf)
     state["pipeline"] = pipeline
     pipeline.start()
@@ -826,22 +926,6 @@ async def main():
     threading.Thread(target=dashboard_server, args=(state, logbuf), daemon=True).start()
     log.info("Dashboard: http://localhost:%d   (target ws://%s:%d)", DASHBOARD_PORT, a.ip, a.port)
     logbuf.add("debug", "VCamUSB server started")
-
-    # camera id: if initial source is cam with device name, map to index.
-    # Numerische IDs direkt übernehmen (kein Namens-Mapping).
-    if state["want"] and state["want"][0] == "cam":
-        name = state["want"][1]
-        if name.isdigit():
-            idx = int(name)
-        else:
-            cams = list_cameras()
-            idx = 0
-            for i, c in enumerate(cams):
-                if c.lower() in name.lower() or name.lower() in c.lower():
-                    idx = i
-                    break
-        state["want"] = ("cam", str(idx))
-        logbuf.add("debug", f"camera mapped to index {idx}")
 
     state["start_time"] = time.time()
     # Pusher liest die Pipe-DYNAMISCH aus der aktuellen Encoder-Instanz.

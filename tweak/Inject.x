@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "needsccw90-2026-09-15-01"
+#define VCAM_BUILD_ID "skip420v-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -80,6 +80,9 @@ static _Atomic int g_modeFigSend = 0;
 static _Atomic uint64_t g_figEmitReplacements = 0;
 static _Atomic uint64_t g_figSendReplacements = 0;
 static _Atomic uint64_t g_photoSwaps = 0;
+// GUARD (Recording): 420v-Buffer (Video-Range) werden NICHT geswappt.
+// Zählt nur Treffer des neuen Early-Out in swapPixelsInPlace.
+static _Atomic uint64_t g_skip420v = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -460,6 +463,18 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
     if (!dst) return NO;
+
+    // GUARD (Recording): 420v (Video-Range) NICHT swappen.
+    // Der Same-Size-Zweig unten macht memcpy ohne Range-Konvertierung,
+    // das erzeugt bei Video-Range-Buffern Farbfehler (lila/grün).
+    // Recording-Buffer (1920x1080 und 2304x1296) laufen als 420v;
+    // solange die Range-Konvertierung dort nicht sauber ist, bleiben
+    // sie unangetastet. Erst nach Astra-Antwort ändern.
+    OSType dstFmtEarly = CVPixelBufferGetPixelFormatType(dst);
+    if (dstFmtEarly == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
+        atomic_fetch_add(&g_skip420v, 1);
+        return NO;
+    }
 
     CVPixelBufferRef src = NULL;
     [g_frameLock lock];
@@ -943,7 +958,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -975,6 +990,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_swapSkippedPhoto),
             (unsigned long long)atomic_load(&g_swapSkippedRecording),
             (int)atomic_load(&g_replacementEnabled),
+            (unsigned long long)atomic_load(&g_skip420v),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
