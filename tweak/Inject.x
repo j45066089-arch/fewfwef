@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "p420fix-2026-09-16-01"
+#define VCAM_BUILD_ID "p420fix-2026-09-16-02"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -736,10 +736,19 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     // auf 0 setzen. Unsere OBS-Pixel sind Querformat (16:9) — der Capture-
     // Graph/Encoder würde sonst anhand des alten 90°-Attachments rotieren,
     // und Foto/Video landen gedreht in der Galerie.
+    // SICHER: reines CFNumber (kein ObjC im Echtzeit-Pfad), lazy init ohne
+    // dispatch_once, und nur anfassen, wenn das Attachment existiert.
     if (ok) {
-        CVBufferRemoveAttachment(dst, (CFStringRef)@"RotationDegrees");
-        CVBufferSetAttachment(dst, (CFStringRef)@"RotationDegrees",
-            (__bridge CFTypeRef)@(0), kCVAttachmentMode_ShouldPropagate);
+        CFDictionaryRef pbAtts = CVBufferGetAttachments(dst, kCVAttachmentMode_ShouldPropagate);
+        if (pbAtts && CFDictionaryGetValue(pbAtts, (CFStringRef)@"RotationDegrees")) {
+            static CFNumberRef zeroCF = NULL;
+            if (!zeroCF) {
+                int zero = 0;
+                zeroCF = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &zero);
+            }
+            CVBufferSetAttachment(dst, (CFStringRef)@"RotationDegrees",
+                zeroCF, kCVAttachmentMode_ShouldPropagate);
+        }
     }
 
     CVPixelBufferRelease(src);
