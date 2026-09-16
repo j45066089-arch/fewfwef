@@ -1,0 +1,38 @@
+name: Build VCamHub
+
+on:
+  push:
+    paths:
+      - 'hub/**'
+      - '.github/workflows/build_hub.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # v4
+
+      - name: Clone roothide theos
+        run: |
+          git clone --depth 1 https://github.com/roothide/theos.git $GITHUB_WORKSPACE/theos
+
+      - name: Build package
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          THEOS_PACKAGE_SCHEME: roothide
+        run: |
+          cd hub
+          make clean package FINALPACKAGE=1 || make clean package FINALPACKAGE=1
+
+      - name: Inspect package
+        run: |
+          cd hub
+          ls -la packages/
+          dpkg-deb -I packages/*.deb | head -30
+          dpkg-deb -c packages/*.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4 # v4
+        with:
+          name: vcamhub-roothide-deb
+          path: hub/packages/*.deb

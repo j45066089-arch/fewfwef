@@ -1,0 +1,9 @@
+Package: com.shosh.vcamhub
+Name: VCamHub
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: VCamUSB WS-Server + Status-Button (SpringBoard)
+Maintainer: Maurice
+Author: Maurice
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
