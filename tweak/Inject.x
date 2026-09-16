@@ -1146,7 +1146,7 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 %end
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
-// In-place Swap (wie Preview), da Logos keine Parameter-Ersetzung in %orig unterstützt
+// In-place Swap (wie LordVCAM VTPixelTransferSessionTransferImage bei 0x1edb0:148)
 %hook BWPhotoEncoderNode
 - (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
     if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
@@ -1155,29 +1155,12 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     }
     
     CMSampleBufferRef sample = (__bridge CMSampleBufferRef)sbuf;
-    CVPixelBufferRef orig = CMSampleBufferGetImageBuffer(sample);
-    if (!orig) { %orig; return; }
     
-    CVPixelBufferRef pc = NULL;
-    [g_frameLock lock];
-    if (g_latestFrame) pc = CVPixelBufferRetain(g_latestFrame);
-    [g_frameLock unlock];
-    
-    if (!pc) { %orig; return; }
-    
-    // In-place Pixelbuffer-Swap (wie LordVCAM VTPixelTransferSessionTransferImage)
-    if (CVPixelBufferLockBaseAddress(orig, 0) == kCVReturnSuccess &&
-        CVPixelBufferLockBaseAddress(pc, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
-        
-        copyPixelBufferContent(pc, orig);
-        
-        CVPixelBufferUnlockBaseAddress(pc, kCVPixelBufferLock_ReadOnly);
-        CVPixelBufferUnlockBaseAddress(orig, 0);
-        
+    // In-place Pixelbuffer-Swap (swapPixelsInPlace nutzt g_latestFrame intern)
+    if (swapPixelsInPlace(sample)) {
         atomic_fetch_add(&g_photoSwaps, 1);
     }
     
-    CVPixelBufferRelease(pc);
     %orig;
 }
 %end
