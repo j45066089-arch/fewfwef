@@ -1146,7 +1146,7 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 %end
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
-// LordVCAM-Stil: Separater Buffer + Original mit ersetztem Parameter
+// In-place Swap (wie Preview), da Logos keine Parameter-Ersetzung in %orig unterstützt
 %hook BWPhotoEncoderNode
 - (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
     if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
@@ -1165,20 +1165,20 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     
     if (!pc) { %orig; return; }
     
-    // Separater Buffer (wie LordVCAM 0x1edb0)
-    CMSampleBufferRef replacement = buildReplacementSampleBuffer(sample, pc);
-    CVPixelBufferRelease(pc);
-    
-    if (replacement) {
+    // In-place Pixelbuffer-Swap (wie LordVCAM VTPixelTransferSessionTransferImage)
+    if (CVPixelBufferLockBaseAddress(orig, 0) == kCVReturnSuccess &&
+        CVPixelBufferLockBaseAddress(pc, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+        
+        copyPixelBufferContent(pc, orig);
+        
+        CVPixelBufferUnlockBaseAddress(pc, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferUnlockBaseAddress(orig, 0);
+        
         atomic_fetch_add(&g_photoSwaps, 1);
-        id replacementObject = (__bridge id)replacement;
-        // %orig expandiert zu _logos_orig$...(self, _cmd, sbuf, input)
-        // Wir rufen es manuell mit ersetztem sbuf:
-        %orig(replacementObject, input);
-        CFRelease(replacement);
-    } else {
-        %orig;
     }
+    
+    CVPixelBufferRelease(pc);
+    %orig;
 }
 %end
 
