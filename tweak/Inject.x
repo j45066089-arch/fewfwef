@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "skip420v-2026-09-16-01"
+#define VCAM_BUILD_ID "recfix-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -464,18 +464,12 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
     if (!dst) return NO;
 
-    // GUARD (Recording): 420v (Video-Range) NICHT swappen.
-    // Der Same-Size-Zweig unten macht memcpy ohne Range-Konvertierung,
-    // das erzeugt bei Video-Range-Buffern Farbfehler (lila/grün).
-    // Recording-Buffer (1920x1080 und 2304x1296) laufen als 420v;
-    // solange die Range-Konvertierung dort nicht sauber ist, bleiben
-    // sie unangetastet. Erst nach Astra-Antwort ändern.
-    OSType dstFmtEarly = CVPixelBufferGetPixelFormatType(dst);
-    if (dstFmtEarly == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
-        atomic_fetch_add(&g_skip420v, 1);
-        return NO;
-    }
-
+    // RECORDING-FIX: 420v-Buffer NICHT mehr blind überspringen. Der
+    // Movie-Sink (BWQuickTimeMovieFileSinkNode) erbt sein renderSampleBuffer:
+    // von BWFileSinkNode und bekommt komprimierte Daten — der unkomprimierte
+    // Feed davor sind genau diese 420v-Buffer. Mit korrekter Range-
+    // Konvertierung (unten) werden sie jetzt geswappt. skip420v bleibt als
+    // Zähler für die 420v-Treffer erhalten.
     CVPixelBufferRef src = NULL;
     [g_frameLock lock];
     if (g_latestFrame) src = CVPixelBufferRetain(g_latestFrame);
@@ -572,7 +566,20 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
         }
 
         if (dw == sw && dh == sh) {
-            // Same-size: stride-aware direkte Kopie (beide Planes)
+            // Same-size: stride-aware Kopie. RECORDING-FIX: Wenn das Ziel
+            // 420v (Video-Range) ist und die Quelle 420f (Full-Range),
+            // MUSS konvertiert werden — memcpy 1:1 erzeugte den lila/grünen
+            // Farbstich im aufgenommenen Video.
+            BOOL dstVideoRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            BOOL srcFullRange  = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            BOOL srcVideoRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            BOOL dstFullRange  = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            ConvFn convY = NULL, convC = NULL;
+            if (srcFullRange && dstVideoRange) { convY = fullToVideoY; convC = fullToVideoC; }
+            else if (srcVideoRange && dstFullRange) { convY = videoToFullY; convC = videoToFullC; }
+
+            if (convY) atomic_fetch_add(&g_skip420v, 1);   // 420v-Treffer weiter zählen (Diagnose)
+
             for (size_t p = 0; p < 2; p++) {
                 const uint8_t *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
                 uint8_t *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
@@ -581,8 +588,17 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
                 size_t ph = CVPixelBufferGetHeightOfPlane(dst, p);
                 size_t copy = db < sb ? db : sb;
-                for (size_t y = 0; y < ph; y++) {
-                    memcpy(dp + y * db, sp + y * sb, copy);
+                ConvFn conv = (p == 0) ? convY : convC;
+                if (conv) {
+                    for (size_t y = 0; y < ph; y++) {
+                        const uint8_t *srow = sp + y * sb;
+                        uint8_t *drow = dp + y * db;
+                        for (size_t x = 0; x < copy; x++) drow[x] = conv(srow[x]);
+                    }
+                } else {
+                    for (size_t y = 0; y < ph; y++) {
+                        memcpy(dp + y * db, sp + y * sb, copy);
+                    }
                 }
             }
             ok = YES;
@@ -605,7 +621,11 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             // Gemessen an der ZIEL-Buffer-Geometrie (der Buffer, den der
             // Capture-Graph liefert = unser dst). Passt zu den Messungen:
             // TikTok 1280x720 (16:9) -> CCW90, Kamera-App 1440x1080 (4:3) -> keine.
-            if (rotDeg == 0) {
+            // RECORDING-FIX: Für 420v-Ziele (Movie-Compressor-Feed) NICHT
+            // rotieren — die Recording-Buffer (2304x1296/1920x1080) sind schon
+            // in Sensor-Orientierung; der Fallback verzerrte das Video.
+            BOOL dstIs420v = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            if (rotDeg == 0 && !dstIs420v) {
                 double dstAspect = (double)dw / (double)dh;
                 if (dstAspect > 1.5 && dw >= dh) rotDeg = 90;
             }
