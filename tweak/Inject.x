@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "recfix-2026-09-16-01"
+#define VCAM_BUILD_ID "rotfix-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -723,6 +723,16 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
         }
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         CVPixelBufferUnlockBaseAddress(dst, 0);
+    }
+
+    // ROTATIONS-FIX: Nach erfolgreichem Swap das RotationDegrees-Attachment
+    // auf 0 setzen. Unsere OBS-Pixel sind Querformat (16:9) — der Capture-
+    // Graph/Encoder würde sonst anhand des alten 90°-Attachments rotieren,
+    // und Foto/Video landen gedreht in der Galerie.
+    if (ok) {
+        CVBufferRemoveAttachment(dst, (CFStringRef)@"RotationDegrees");
+        CVBufferSetAttachment(dst, (CFStringRef)@"RotationDegrees",
+            (__bridge CFTypeRef)@(0), kCVAttachmentMode_ShouldPropagate);
     }
 
     CVPixelBufferRelease(src);
