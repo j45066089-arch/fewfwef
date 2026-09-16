@@ -1147,13 +1147,14 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
 %hook BWPhotoEncoderNode
-- (void)renderSampleBuffer:(CMSampleBufferRef)sbuf forInput:(id)input {
+- (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
+    CMSampleBufferRef sample = (__bridge CMSampleBufferRef)sbuf;
     if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
         %orig;
         return;
     }
     
-    CVPixelBufferRef orig = CMSampleBufferGetImageBuffer(sbuf);
+    CVPixelBufferRef orig = CMSampleBufferGetImageBuffer(sample);
     if (!orig) { %orig; return; }
     
     CVPixelBufferRef pc = NULL;
@@ -1164,7 +1165,7 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     if (!pc) { %orig; return; }
     
     // Separater Buffer statt In-place (LordVCAM-Stil)
-    CMSampleBufferRef replacement = buildReplacementSampleBuffer(sbuf, pc);
+    CMSampleBufferRef replacement = buildReplacementSampleBuffer(sample, pc);
     CVPixelBufferRelease(pc);
     
     if (replacement) {
