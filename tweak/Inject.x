@@ -299,48 +299,7 @@ static _Atomic int64_t g_passthroughOrig = 0;
 static CVPixelBufferRef g_testPattern = NULL;
 static _Atomic int64_t g_testPatternUsed = 0;
 
-static CVPixelBufferRef makeTestPattern(void) {
-    NSDictionary *attrs = @{
-        (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
-        (__bridge id)kCVPixelBufferWidthKey: @(1440),
-        (__bridge id)kCVPixelBufferHeightKey: @(1080),
-        (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
-        (__bridge id)kCVPixelBufferBytesPerRowAlignmentKey: @64,
-    };
-    CVPixelBufferRef pb = NULL;
-    CVReturn cr = CVPixelBufferCreate(kCFAllocatorDefault, 1440, 1080,
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-        (__bridge CFDictionaryRef)attrs, &pb);
-    if (!pb) return NULL;
-
-    // Diagnose: ist der Buffer IOSurface-backed?
-    IOSurfaceRef surf = CVPixelBufferGetIOSurface(pb);
-    L("Testmuster: IOSurface=%s (id=%u)", surf ? "JA" : "NEIN",
-      surf ? IOSurfaceGetID(surf) : 0);
-    size_t s0 = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
-    size_t s1 = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
-    L("Testmuster: stride=%zu/%zu", s0, s1);
-
-    CVPixelBufferLockBaseAddress(pb, 0);
-    uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
-    uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
-    size_t yS = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
-    size_t uvS = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
-    size_t w = CVPixelBufferGetWidth(pb);
-    size_t h = CVPixelBufferGetHeight(pb);
-
-    for (size_t r = 0; r < h; r++) memset(y + r * yS, 100, w);
-    for (size_t r = 0; r < h / 2; r++) {
-        uint8_t *row = uv + r * uvS;
-        for (size_t x = 0; x < w; x += 2) {
-            row[x] = 128;      // Cb
-            row[x + 1] = 128;  // Cr
-        }
-    }
-    CVPixelBufferUnlockBaseAddress(pb, 0);
-    return pb;
-}
+// makeTestPattern entfernt — war unused
 
 // ---------------------------------------------------------------- Range-Shift (deaktiviert, entfernt)
 // War ein In-Place-/Kopie-Shift, der den Decoder destabilisiert hat. Passthrough nutzt ihn nicht.
