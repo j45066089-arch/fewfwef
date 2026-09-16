@@ -894,22 +894,11 @@ static void maybeResetPhotoGuard(void) {
 }
 %end
 
-// ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
-// In-place Swap (wie LordVCAM VTPixelTransferSessionTransferImage bei 0x1edb0:148)
+// ---------------------------------------------------------------- BWPhotoEncoderNode
+// Beobachtung-only: Photo-Replacement bleibt deaktiviert, bis der
+// VTPixelTransferSession-/IOSurface-Pfad separat verifiziert ist.
 %hook BWPhotoEncoderNode
 - (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
-    if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
-        %orig;
-        return;
-    }
-    
-    CMSampleBufferRef sample = (__bridge CMSampleBufferRef)sbuf;
-    
-    // In-place Pixelbuffer-Swap (swapPixelsInPlace nutzt g_latestFrame intern)
-    if (swapPixelsInPlace(sample)) {
-        atomic_fetch_add(&g_photoSwaps, 1);
-    }
-    
     %orig;
 }
 %end
