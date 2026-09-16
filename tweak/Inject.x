@@ -1146,8 +1146,15 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 %end
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
+// LordVCAM-Stil: Separater Buffer + Original-IMP mit ersetztem Parameter
+static IMP g_photoEncoderOrigIMP = NULL;
+
 %hook BWPhotoEncoderNode
 - (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
+    if (!g_photoEncoderOrigIMP) {
+        g_photoEncoderOrigIMP = (IMP)method_getImplementation(class_getInstanceMethod([self class], _cmd));
+    }
+    
     if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
         %orig;
         return;
@@ -1164,15 +1171,15 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     
     if (!pc) { %orig; return; }
     
-    // Separater Buffer statt In-place (LordVCAM-Stil)
+    // Separater Buffer (wie LordVCAM 0x1edb0)
     CMSampleBufferRef replacement = buildReplacementSampleBuffer(sample, pc);
     CVPixelBufferRelease(pc);
     
     if (replacement) {
         atomic_fetch_add(&g_photoSwaps, 1);
-        // Rufe Original mit ersetztem Sample-Buffer
         id replacementObject = (__bridge id)replacement;
-        [self renderSampleBuffer:replacementObject forInput:input];
+        // Direkt Original-IMP aufrufen mit ersetztem Sample (wie LordVCAM (*DAT_0015eb88)(...))
+        ((void (*)(id, SEL, id, id))g_photoEncoderOrigIMP)(self, _cmd, replacementObject, input);
         CFRelease(replacement);
     } else {
         %orig;
