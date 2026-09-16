@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ptmin-2026-09-16-01"
+#define VCAM_BUILD_ID "skip420v-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -83,17 +83,6 @@ static _Atomic uint64_t g_photoSwaps = 0;
 // GUARD (Recording): 420v-Buffer (Video-Range) werden NICHT geswappt.
 // Zählt nur Treffer des neuen Early-Out in swapPixelsInPlace.
 static _Atomic uint64_t g_skip420v = 0;
-
-// ---------------------------------------------------------------- BWPixelTransferNode-Beobachtung (LordVCAM Hook #7)
-// MINIMAL-HOOK: default NUR globaler Zähler (null Getter, null Slots).
-// Getter/Inspektion erst nach Runtime-Freigabe per Status-Kommando ptdeep=1,
-// weil sowohl ptobserve als auch ptobserve2 den Still-Pfad in mediaserverd
-// hängen ließen. LordVCAM hookt dieselbe Klasse in avservicesd — ob der
-// Hook in mediaserverd überhaupt verträglich ist, beweist dieser Build.
-static _Atomic uint64_t g_ptCount = 0;
-static _Atomic int64_t g_ptBig = 0;
-static _Atomic int64_t g_ptDeep = 0;   // 1 = Getter aktiv (per ptdeep=1)
-static _Atomic int64_t g_ptDeepFmt = 0, g_ptDeepW = 0, g_ptDeepH = 0, g_ptDeepSurf = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -929,34 +918,6 @@ static void maybeResetPhotoGuard(void) {
 }
 %end
 
-// ---------------------------------------------------------------- BWPixelTransferNode (LordVCAM Hook #7)
-// MINIMAL-HOOK: nur Zähler. Getter (ptdeep) erst nach Runtime-Freigabe.
-%hook BWPixelTransferNode
-- (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
-    atomic_fetch_add(&g_ptCount, 1);
-    if (atomic_load(&g_ptDeep) != 0) {
-        CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sbuf;
-        if (sb) {
-            CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
-            if (px) {
-                size_t w = CVPixelBufferGetWidth(px);
-                size_t h = CVPixelBufferGetHeight(px);
-                if (w > 3200 || h > 3200) {
-                    atomic_fetch_add(&g_ptBig, 1);
-                } else {
-                    atomic_store(&g_ptDeepFmt, (int64_t)CVPixelBufferGetPixelFormatType(px));
-                    atomic_store(&g_ptDeepW, (int64_t)w);
-                    atomic_store(&g_ptDeepH, (int64_t)h);
-                    IOSurfaceRef surf = CVPixelBufferGetIOSurface(px);
-                    atomic_store(&g_ptDeepSurf, surf ? (int64_t)IOSurfaceGetID(surf) : -1);
-                }
-            }
-        }
-    }
-    %orig;
-}
-%end
-
 // ---------------------------------------------------------------- Status-Server (8769)
 static void statusServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -988,12 +949,6 @@ static void statusServerThread(void) {
                 }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
-            } else if (strncmp(cmd, "ptdeep=1", 8) == 0) {
-                atomic_store(&g_ptDeep, 1);
-                L("ptdeep AKTIV (Getter eingeschaltet)");
-            } else if (strncmp(cmd, "ptdeep=0", 8) == 0) {
-                atomic_store(&g_ptDeep, 0);
-                L("ptdeep AUS");
             }
         }
         char msg[16384];
@@ -1082,19 +1037,6 @@ static void statusServerThread(void) {
                 (unsigned)(long long)atomic_load(&g_misSrcFmt),
                 (long long)atomic_load(&g_misSrcW),
                 (long long)atomic_load(&g_misSrcH));
-            if (mw > 0) w += mw;
-        }
-        // BWPixelTransferNode-Minimalhook-Zähler
-        {
-            int mw = snprintf(msg + w, sizeof(msg) - w,
-                " PTCNT=%llu big=%lld deep=%lld fmt=0x%08llx %lldx%lld surf=%lld\n",
-                (unsigned long long)atomic_load(&g_ptCount),
-                (long long)atomic_load(&g_ptBig),
-                (long long)atomic_load(&g_ptDeep),
-                (unsigned long long)atomic_load(&g_ptDeepFmt),
-                (long long)atomic_load(&g_ptDeepW),
-                (long long)atomic_load(&g_ptDeepH),
-                (long long)atomic_load(&g_ptDeepSurf));
             if (mw > 0) w += mw;
         }
         if (wantFullDump) {
