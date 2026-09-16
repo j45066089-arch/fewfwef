@@ -1170,7 +1170,7 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     
     if (replacement) {
         atomic_fetch_add(&g_photoSwaps, 1);
-        %orig(replacement, input);
+        %orig((__bridge id)replacement, input);
         CFRelease(replacement);
     } else {
         %orig;
