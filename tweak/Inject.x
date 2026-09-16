@@ -1107,7 +1107,7 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     CFRelease(fmt_desc);
     CVPixelBufferRelease(newBuf);
     
-    // Sample-Attachments kopieren
+    // Sample-Attachments kopieren (direkt via CFDictionary)
     if (newSB) {
         CFArrayRef origAttachments = CMSampleBufferGetSampleAttachmentsArray(original, false);
         if (origAttachments && CFArrayGetCount(origAttachments) > 0) {
@@ -1115,10 +1115,17 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
             if (newAttachments && CFArrayGetCount(newAttachments) > 0) {
                 CFDictionaryRef origDict = (CFDictionaryRef)CFArrayGetValueAtIndex(origAttachments, 0);
                 CFMutableDictionaryRef newDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(newAttachments, 0);
-                if (origDict && newDict) {
-                    CFDictionaryApplyFunction(origDict, ^(const void *key, const void *value, void *context) {
-                        CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
-                    }, newDict);
+                if (origDict && newDict && CFDictionaryGetCount(origDict) > 0) {
+                    // Kopiere alle Keys/Values
+                    CFIndex count = CFDictionaryGetCount(origDict);
+                    const void **keys = (const void **)malloc(count * sizeof(void *));
+                    const void **values = (const void **)malloc(count * sizeof(void *));
+                    CFDictionaryGetKeysAndValues(origDict, keys, values);
+                    for (CFIndex i = 0; i < count; i++) {
+                        CFDictionarySetValue(newDict, keys[i], values[i]);
+                    }
+                    free(keys);
+                    free(values);
                 }
             }
         }
