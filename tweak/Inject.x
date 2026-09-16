@@ -1171,7 +1171,9 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     if (replacement) {
         atomic_fetch_add(&g_photoSwaps, 1);
         id replacementObject = (__bridge id)replacement;
-        %orig(replacementObject, input);
+        // Logos %orig() unterstützt kein Argument-Replacement, daher manueller Call
+        void (*origIMP)(id, SEL, id, id) = (void *)%orig;
+        origIMP(self, _cmd, replacementObject, input);
         CFRelease(replacement);
     } else {
         %orig;
