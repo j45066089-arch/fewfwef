@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "skip420v-2026-09-16-01"
+#define VCAM_BUILD_ID "ptobserve-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -83,6 +83,25 @@ static _Atomic uint64_t g_photoSwaps = 0;
 // GUARD (Recording): 420v-Buffer (Video-Range) werden NICHT geswappt.
 // Zählt nur Treffer des neuen Early-Out in swapPixelsInPlace.
 static _Atomic uint64_t g_skip420v = 0;
+
+// ---------------------------------------------------------------- BWPixelTransferNode-Beobachtung (LordVCAM Hook #7)
+// REINE Observierung: Formate/Größen am Eingang, Aufrufrate, IOSurface-ID.
+// Kein Transfer, keine Rotation, keine Photo-Änderung. Pro-Objekt-Array,
+// weil mehrere PixelTransferNodes parallel existieren (je Stream einer).
+// Ziel: beweisen, ob/wo 420f->420v konvertiert wird (Abgleich SurfID:
+// sieht PT SurfID X, taucht dieselbe ID später am BWNodeOutput als 420v auf,
+// hat der Knoten NICHT konvertiert; neue ID = neuer Buffer = Konvertierung).
+typedef struct {
+    uintptr_t object;
+    uint64_t calls;
+    int64_t lastInFmt;
+    int64_t lastInW;
+    int64_t lastInH;
+    int64_t lastSurfID;
+    char className[96];
+} PTEntry;
+static PTEntry g_pt[64] = {0};
+static pthread_mutex_t g_ptMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -918,6 +937,40 @@ static void maybeResetPhotoGuard(void) {
 }
 %end
 
+// ---------------------------------------------------------------- BWPixelTransferNode (LordVCAM Hook #7)
+// REINE Observierung. Kein Eingriff in die Pixel — nur Messung der Eingangs-
+// SampleBuffer (Format, Größe, IOSurface-ID) pro Knoten-Instanz.
+%hook BWPixelTransferNode
+- (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
+    uintptr_t object = (uintptr_t)self;
+    pthread_mutex_lock(&g_ptMutex);
+    int slot = -1;
+    for (int i = 0; i < 64; i++) {
+        if (g_pt[i].object == object) { slot = i; break; }
+        if (slot < 0 && g_pt[i].object == 0) slot = i;
+    }
+    if (slot >= 0) {
+        g_pt[slot].object = object;
+        g_pt[slot].calls++;
+        snprintf(g_pt[slot].className, sizeof(g_pt[slot].className), "%s",
+                 object_getClassName(self));
+        CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sbuf;
+        if (sb) {
+            CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+            if (px) {
+                g_pt[slot].lastInFmt = (int64_t)CVPixelBufferGetPixelFormatType(px);
+                g_pt[slot].lastInW = (int64_t)CVPixelBufferGetWidth(px);
+                g_pt[slot].lastInH = (int64_t)CVPixelBufferGetHeight(px);
+                IOSurfaceRef surf = CVPixelBufferGetIOSurface(px);
+                g_pt[slot].lastSurfID = surf ? (int64_t)IOSurfaceGetID(surf) : -1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_ptMutex);
+    %orig;
+}
+%end
+
 // ---------------------------------------------------------------- Status-Server (8769)
 static void statusServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -1038,6 +1091,22 @@ static void statusServerThread(void) {
                 (long long)atomic_load(&g_misSrcW),
                 (long long)atomic_load(&g_misSrcH));
             if (mw > 0) w += mw;
+        }
+        // BWPixelTransferNode-Beobachtung (nur wenn es Treffer gibt)
+        {
+            pthread_mutex_lock(&g_ptMutex);
+            for (int i = 0; i < 64 && w < (int)sizeof(msg) - 300; i++) {
+                if (g_pt[i].object == 0) break;
+                int mw = snprintf(msg + w, sizeof(msg) - w,
+                    "PT[%d]=0x%lx:%s:calls=%llu in=0x%08llx %lldx%lld surf=%lld\n",
+                    i, (unsigned long)g_pt[i].object, g_pt[i].className,
+                    (unsigned long long)g_pt[i].calls,
+                    (unsigned long long)g_pt[i].lastInFmt,
+                    (long long)g_pt[i].lastInW, (long long)g_pt[i].lastInH,
+                    (long long)g_pt[i].lastSurfID);
+                if (mw > 0) w += mw;
+            }
+            pthread_mutex_unlock(&g_ptMutex);
         }
         if (wantFullDump) {
             if (g_methodDump[0]) {
