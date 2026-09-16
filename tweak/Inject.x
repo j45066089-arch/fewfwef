@@ -1619,6 +1619,8 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
 }
 %end
 
+%end // %group vcamhooks
+
 // ---------------------------------------------------------------- ctor
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
