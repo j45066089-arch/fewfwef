@@ -1148,12 +1148,12 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
 // ---------------------------------------------------------------- BWPhotoEncoderNode (Foto-Replacement)
 %hook BWPhotoEncoderNode
 - (void)renderSampleBuffer:(id)sbuf forInput:(id)input {
-    CMSampleBufferRef sample = (__bridge CMSampleBufferRef)sbuf;
     if (!atomic_load(&g_replacementEnabled) || !atomic_load(&g_photoInProgress)) {
         %orig;
         return;
     }
     
+    CMSampleBufferRef sample = (__bridge CMSampleBufferRef)sbuf;
     CVPixelBufferRef orig = CMSampleBufferGetImageBuffer(sample);
     if (!orig) { %orig; return; }
     
@@ -1170,10 +1170,9 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
     
     if (replacement) {
         atomic_fetch_add(&g_photoSwaps, 1);
+        // Rufe Original mit ersetztem Sample-Buffer
         id replacementObject = (__bridge id)replacement;
-        // Logos %orig() unterstützt kein Argument-Replacement, daher manueller Call
-        void (*origIMP)(id, SEL, id, id) = (void *)%orig;
-        origIMP(self, _cmd, replacementObject, input);
+        [self renderSampleBuffer:replacementObject forInput:input];
         CFRelease(replacement);
     } else {
         %orig;
