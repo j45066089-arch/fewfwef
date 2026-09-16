@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "rotfix-2026-09-16-01"
+#define VCAM_BUILD_ID "p420fix-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -630,13 +630,20 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 if (dstAspect > 1.5 && dw >= dh) rotDeg = 90;
             }
             // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
+            // WICHTIG: p420 (0x70343230) ist NICHT Video-Range — es ist Apples
+            // FourCC für 420YpCbCr8BiPlanarVideoRange, aber im PREVIEW-Pfad
+            // wird es als Full-Range-Daten behandelt (der Decoder liefert 420f).
+            // Nur echtes 420v (kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            // darf konvertiert werden — sonst lila/grüne Preview-Farben.
             BOOL srcFullRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
             BOOL dstFullRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            BOOL dstIsVideoRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            BOOL srcIsVideoRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             ConvFn convY = NULL, convC = NULL;
-            if (srcFullRange && !dstFullRange) {
+            if (srcFullRange && dstIsVideoRange) {
                 convY = fullToVideoY;
                 convC = fullToVideoC;
-            } else if (!srcFullRange && dstFullRange) {
+            } else if (srcIsVideoRange && dstFullRange) {
                 convY = videoToFullY;
                 convC = videoToFullC;
             }
