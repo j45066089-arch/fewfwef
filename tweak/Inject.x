@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "p420fix-2026-09-16-02"
+#define VCAM_BUILD_ID "watchdogfix2-2026-09-16-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -845,6 +845,14 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
     pthread_mutex_unlock(&g_objMutex);
 }
 
+// ----------------------------------------------------------------
+// ASTRA/WATCHDOG-FIX: Alle Hooks in eine %group. Logos installiert
+// sie dann NICHT synchron im Auto-Constructor (dlopen im Startpfad
+// von mediaserverd -> Main-Thread hing, watchdogd killte mit SIGKILL,
+// kein launchd-Checkin). Stattdessen verzögertes %init im %ctor.
+// ----------------------------------------------------------------
+%group vcamhooks
+
 %hook BWNodeOutput
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
@@ -1616,6 +1624,17 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"mediaserverd"]) return;
+
+    // ASTRA/WATCHDOG-FIX: Hooks NICHT sofort installieren. Logos hängt sie
+    // sonst synchron in den dlopen-Pfad (Start von mediaserverd) und der
+    // Daemon verpasst seinen launchd-Checkin -> watchdogd SIGKILL.
+    // Erst verzögert auf der Main-Queue %init(vcamhooks) aufrufen.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        %init(vcamhooks);
+        L("Hook-Installation abgeschlossen (verzögert, stage=%d)",
+          (int)atomic_load(&g_stage));
+    });
 
     // Diagnose EINMALIG nach kurzer Verzögerung (Astra: keine 5s-Dauerlast mehr).
     // Wiederholung nur auf explizites Kommando (redump / über Status-Port).
