@@ -2,37 +2,47 @@ name: Build VCamHub
 
 on:
   push:
+    branches: [ master, main ]
     paths:
       - 'hub/**'
       - '.github/workflows/build_hub.yml'
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4 # v4
 
-      - name: Clone roothide theos
+      - name: Setup Roothide Theos
         run: |
-          git clone --depth 1 https://github.com/roothide/theos.git $GITHUB_WORKSPACE/theos
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          test -f "$HOME/theos/vendor/mod/roothide/package/deb.mk"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          git -C "$HOME/theos" rev-parse HEAD
 
-      - name: Build package
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          THEOS_PACKAGE_SCHEME: roothide
-        run: |
-          cd hub
-          make clean package FINALPACKAGE=1 || make clean package FINALPACKAGE=1
+      - name: Install packaging dependencies
+        run: brew install ldid dpkg xz
+
+      - name: Build roothide package
+        working-directory: hub
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
       - name: Inspect package
+        working-directory: hub
         run: |
-          cd hub
-          ls -la packages/
-          dpkg-deb -I packages/*.deb | head -30
-          dpkg-deb -c packages/*.deb
+          for package in packages/*.deb; do
+            test "$(dpkg-deb -f "$package" Architecture)" = iphoneos-arm64e
+            dpkg-deb -I "$package"
+            dpkg-deb -c "$package"
+          done
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4 # v4
+      - uses: actions/upload-artifact@v4 # v4
         with:
           name: vcamhub-roothide-deb
           path: hub/packages/*.deb
+          if-no-files-found: error
