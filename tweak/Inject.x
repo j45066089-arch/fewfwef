@@ -1716,6 +1716,63 @@ static void wsClientThread(void) {
                         } else if ([cmd hasPrefix:@"mdon="]) {
                             int nm = [[cmd substringFromIndex:5] intValue];
                             if (nm >= 0 && nm <= 1) { atomic_store(&g_metaOn, nm); L("WS: MDON %d", nm); }
+                        } else if ([cmd isEqualToString:@"status?"]) {
+                            // Kompakten Status als maskierten WS-Text-Frame zuruecksenden
+                            char sb[512];
+                            snprintf(sb, sizeof(sb),
+                                "build=%s stage=%lld mdon=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+                                "inplace=%llu errors=%llu hasFrame=%llu origFmt=0x%08x origSize=%lldx%lld "
+                                "decodedFmt=0x%08x decodedSize=%lldx%lld",
+                                VCAM_BUILD_ID, (long long)atomic_load(&g_stage),
+                                (int)atomic_load(&g_metaOn),
+                                (long long)atomic_load(&g_videoLuma),
+                                (long long)atomic_load(&g_videoLux),
+                                (double)g_metaExposure, (double)g_metaSnr,
+                                (long long)atomic_load(&g_metaIso),
+                                (unsigned long long)atomic_load(&g_inplaceSwap),
+                                (unsigned long long)atomic_load(&g_decodeErrorCount),
+                                (unsigned long long)atomic_load(&g_hasLatestFrame),
+                                (unsigned)(long long)atomic_load(&g_origPixelFormat),
+                                (long long)atomic_load(&g_origWidth),
+                                (long long)atomic_load(&g_origHeight),
+                                (unsigned)(long long)atomic_load(&g_decodedFormat),
+                                (long long)atomic_load(&g_decodedWidth),
+                                (long long)atomic_load(&g_decodedHeight));
+                            NSString *s = [NSString stringWithUTF8String:sb];
+                            if (s) {
+                                NSData *sd = [s dataUsingEncoding:NSUTF8StringEncoding];
+                                NSUInteger slen = sd.length;
+                                uint8_t hdr[10];
+                                size_t hl = 2;
+                                hdr[0] = 0x81;
+                                if (slen < 126) {
+                                    hdr[1] = (uint8_t)slen;
+                                } else if (slen < 65536) {
+                                    hdr[1] = 126;
+                                    hdr[2] = (uint8_t)(slen >> 8);
+                                    hdr[3] = (uint8_t)(slen & 0xff);
+                                    hl = 4;
+                                } else {
+                                    hdr[1] = 127;
+                                    for (int b = 0; b < 8; b++) hdr[2 + b] = (uint8_t)(slen >> (56 - b * 8));
+                                    hl = 10;
+                                }
+                                hdr[1] |= 0x80;   // Client->Server: maskiert
+                                uint8_t mask[4];
+                                for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(rand() & 0xff);
+                                size_t total = hl + 4 + slen;
+                                uint8_t *out = malloc(total);
+                                if (out) {
+                                    memcpy(out, hdr, hl);
+                                    memcpy(out + hl, mask, 4);
+                                    const uint8_t *src = (const uint8_t *)sd.bytes;
+                                    for (NSUInteger i = 0; i < slen; i++)
+                                        out[hl + 4 + i] = src[i] ^ mask[i & 3];
+                                    sendAllFD(fd, out, total);
+                                    free(out);
+                                    L("WS: Status zurueckgesendet (%zu Bytes)", slen);
+                                }
+                            }
                         }
                     }
                     free(payload);

@@ -578,6 +578,16 @@ class FramePusher:
         except Exception:
             pass
 
+    async def _recv_loop(self, ws):
+        """Empfaengt Text-Nachrichten (Tweak-Status) vom Hub/Tweak."""
+        try:
+            async for msg in ws:
+                if isinstance(msg, str):
+                    self.state["tweak_status"] = msg
+                    self.state["tweak_status_ts"] = time.time()
+        except Exception:
+            pass
+
     async def run(self):
         from websockets.asyncio.client import connect
         import struct as _struct
@@ -603,6 +613,7 @@ class FramePusher:
                     self.state["connected"] = True
                     log.info("connected to %s:%s", self.ip, self.port)
                     await ws.send(json.dumps({"type": "hs", "v": 1}))
+                    recv_task = asyncio.create_task(self._recv_loop(ws))
                     # wait for pipe (dynamisch aus dem Resolver)
                     def current_pipe():
                         return getattr(self, "pipe_resolver", None) and \
@@ -766,6 +777,14 @@ class FramePusher:
                                 self.state["ws_cmds"] = self.state.get("ws_cmds", 0) + 1
                         except queue.Empty:
                             pass
+                        # Status-Poll: alle 2s "status?" anfordern (Tweak antwortet ueber WS-Text)
+                        tnow = time.monotonic()
+                        if tnow - getattr(self, "_lastStatusReq", 0.0) > 2.0:
+                            self._lastStatusReq = tnow
+                            try:
+                                await ws.send("status?")
+                            except Exception:
+                                pass
                         await asyncio.sleep(0.001)
             except Exception as e:
                 self.state["connected"] = False
@@ -948,6 +967,13 @@ class Dashboard:
         self.device = DeviceBridge()
         self.html = open(DASH_PATH, encoding="utf-8").read()
 
+    @staticmethod
+    def _parse_tweak(txt):
+        out = {}
+        for m in re.finditer(r"(\w+)=([\d.]+)", txt or ""):
+            out[m.group(1)] = m.group(2)
+        return out
+
     def handle_get(self, u):
         if u.path == "/":
             return 200, "text/html", self.html
@@ -973,6 +999,7 @@ class Dashboard:
                 "transform": st.get("transform", {}),
                 "filters": st.get("filters", {}),
                 "playback": st.get("playback", {}),
+                "tweak": self._parse_tweak(st.get("tweak_status", "")),
             }
             return 200, "application/json", json.dumps(body)
         if u.path == "/api/cameras":

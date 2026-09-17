@@ -214,6 +214,12 @@
     </div>
 
     <div class="card">
+      <div class="card-title">Leak-Check</div>
+      <div id="leakRows"><div class="hint">Warte auf Tweak-Status …</div></div>
+      <div class="hint" style="margin-top:6px">Live vom Tweak über WS. Motion/Depth/EXIF folgen in Schritt 3/4/2.</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Filters</div>
       <div class="filter-row"><label>Brightness</label><input type="range" id="fB" min="-100" max="100" value="0"><span id="fBv">0.00</span></div>
       <div class="filter-row"><label>Contrast</label><input type="range" id="fC" min="25" max="400" value="100"><span id="fCv">1.00</span></div>
@@ -430,6 +436,34 @@ function toggleLoop() {
   ctrl('playback', {action:'loop', enabled:loop});
 }
 
+// ── Leak-Check ──
+function renderLeak(t) {
+  const ok   = v => '<span style="color:var(--green)">✅ ' + v + '</span>';
+  const warn = v => '<span style="color:#e6a700">⚠️ ' + v + '</span>';
+  const bad  = v => '<span style="color:var(--red)">❌ ' + v + '</span>';
+  const stage = parseInt(t.stage || '0');
+  const rows = [];
+  rows.push(['METADATA', t.mdon === '1'
+    ? (parseInt(t.lux || '0') > 0 ? ok('an · Lux ' + t.lux) : warn('an · keine Frames'))
+    : bad('AUS (mdon=0)')]);
+  rows.push(['ISO / EXPT', (parseFloat(t.expt || '0') > 0.0001 && t.iso !== undefined)
+    ? ok('1/' + Math.round(1/Math.max(parseFloat(t.expt),1e-6)) + 's · ISO ' + (t.iso === '0' ? 'auto' : t.iso))
+    : bad('nicht gesetzt')]);
+  rows.push(['SWAP', parseInt(t.inplace || '0') > 0
+    ? ok(t.inplace + ' Swaps')
+    : (stage >= 3 ? warn('Stage 3, noch keine Swaps') : warn('Stage ' + stage + ' (nicht VOLL)'))]);
+  rows.push(['DECODER', parseInt(t.errors || '0') === 0 ? ok('0 Fehler') : warn(t.errors + ' Fehler')]);
+  rows.push(['FORMAT', t.origSize && t.origSize === t.decodedSize
+    ? ok(t.origSize)
+    : warn('Feed ' + t.decodedSize + ' vs nativ ' + t.origSize)]);
+  rows.push(['MOTION', bad('offen (Schritt 3)')]);
+  rows.push(['DEPTH', bad('offen (Schritt 4)')]);
+  rows.push(['FOTO-EXIF', warn('manuell prüfen (ExifTool)')]);
+  $('leakRows').innerHTML = rows.map(r =>
+    '<div class="filter-row"><label>' + r[0] + '</label><span style="font-size:11px">' + r[1] + '</span></div>'
+  ).join('');
+}
+
 // ── Device (iPhone) ──
 function devCmd(cmd) {
   fetch('/api/device_cmd', { method:'POST', headers:{'Content-Type':'application/json'},
@@ -512,6 +546,7 @@ async function poll() {
     if (!r.ok) return;
     const s = await r.json();
     gSrv = s;
+    if (s.tweak && s.tweak.build) renderLeak(s.tweak);
     const d = $('tweakDot'), l = $('tweakLabel');
     if (s.connected) { d.className='pulse online'; l.textContent='CONNECTED'; l.style.color='var(--green)'; }
     else { d.className='pulse offline'; l.textContent='OFFLINE'; l.style.color='var(--red)'; }
