@@ -96,14 +96,14 @@ static BOOL hubSendAll(int fd, const void *data, size_t len) {
     return YES;
 }
 
-static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
+static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len, uint8_t opcode) {
     pthread_mutex_lock(&g_cliMutex);
     for (int i = 0; i < 16; i++) {
         int fd = g_clients[i];
         if (fd != -1 && fd != fromFd) {
             uint8_t hdr[10];
             size_t hl = 2;
-            hdr[0] = 0x82;
+            hdr[0] = (opcode == 0x1) ? 0x81 : 0x82;   // Text bleibt Text (Kommandos!), Binary bleibt Binary
             if (len < 126) {
                 hdr[1] = (uint8_t)len;
             } else if (len < 65536) {
@@ -196,7 +196,7 @@ static void *hubClientThread(void *arg) {
                         continue;
                     }
                     if (opcode == 0x2 || opcode == 0x1) {
-                        hubBroadcastExcept(fd, payload, (size_t)plen);
+                        hubBroadcastExcept(fd, payload, (size_t)plen, opcode);
                         free(payload);
                         continue;
                     }
