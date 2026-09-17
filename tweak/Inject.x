@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-probe-1"
+#define VCAM_BUILD_ID "ios18-probe-2"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -79,6 +79,7 @@ static _Atomic int64_t g_videoLux = 0;    // daraus abgeleitetes LuxLevel
 static float g_metaExposure = 0.008333f;  // "expt=" Belichtungszeit (Sekunden)
 static float g_metaSnr = 24.0f;           // "snr=" Rauschmaß (dB-artig)
 static _Atomic int64_t g_metaIso = 0;     // "iso=" (0 = auto aus LuxLevel)
+static char g_procName[64] = {0};         // Host-Prozessname (iOS 18: welcher Capture-Daemon)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
 static _Atomic uint64_t g_swapSkippedPhoto = 0;
@@ -291,18 +292,33 @@ static void pumpDecoder(void) {
             VTDecompressionOutputCallbackRecord cb;
             cb.decompressionOutputCallback = decompressionOutputCallback;
             cb.decompressionOutputRefCon = NULL;
+            // iOS 18 darf 420f+IOSurface teils verweigern -> mehrstufige Fallbacks.
             NSDictionary *attrs = @{
                 (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
                 (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
             };
             OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
                 (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
+            if ((st != noErr || !g_vtSession) && st != noErr) {
+                // Fallback 1: 420f ohne IOSurface-Zwang
+                if (g_vtSession) { CFRelease(g_vtSession); g_vtSession = NULL; }
+                NSDictionary *attrs2 = @{
+                    (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+                };
+                st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
+                    (__bridge CFDictionaryRef)attrs2, &cb, &g_vtSession);
+            }
+            if (st != noErr || !g_vtSession) {
+                // Fallback 2: VT Format selbst waehlen lassen (liefert meist 420v)
+                if (g_vtSession) { CFRelease(g_vtSession); g_vtSession = NULL; }
+                st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL, NULL, &cb, &g_vtSession);
+            }
             if (st != noErr || !g_vtSession) {
                 atomic_store(&g_vtSessionError, st);
-                L("VT-Session FAIL: %d", (int)st);
+                L("VT-Session FAIL: %d (0x%x)", (int)st, (int)st);
                 return;
             }
-            L("Decode-Session OK");
+            L("Decode-Session OK (st=%d)", (int)st);
         }
 
         // AU ist bereits AVCC-formatiert -> direkt als BlockBuffer
@@ -1362,7 +1378,7 @@ static void statusServerThread(void) {
         }
         char msg[16384];
         int w = snprintf(msg, sizeof(msg),
-            "build=%s stage=%d\n"
+            "build=%s proc=%s stage=%d\n"
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
@@ -1370,6 +1386,7 @@ static void statusServerThread(void) {
             "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
+            g_procName,
             (int)atomic_load(&g_stage),
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -2081,6 +2098,7 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
         ]];
     }
     if (![captureProcs containsObject:proc]) return;
+    snprintf(g_procName, sizeof(g_procName), "%s", [proc UTF8String] ?: "?");
     L("Capture-Daemon erkannt: %@", proc);
 
     // LORDVCAM-STIL (1): Private Frameworks VOR dem Hooken laden.
