@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "fillfix-2026-09-17-01"
+#define VCAM_BUILD_ID "rotvfix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -90,6 +90,11 @@ static _Atomic uint64_t g_skipPortrait = 0;
 // ROT-MODUS (Status-Port "rot=N"): 0=aus (Center-Crop), 1=90°CW,
 // 2=90°CCW, 3=180° — Letterbox-Rotation für alle Landscape-Ziele.
 static _Atomic int64_t g_rotMode = 1;
+// VIDEO-PFAD (420v-Movie-Encoder-Feed): eigene Richtung. Die Kamera-App
+// schreibt eine 90°-Rotationsmatrix ins Video-File — die Pre-Rotation des
+// Video-Pfads muss GEGENLÄUFIG sein, sonst landet das Video gedreht in der
+// Galerie. 0 = wie rot-Modus.
+static _Atomic int64_t g_rotVidMode = 2;
 static _Atomic uint64_t g_rotApplied = 0;
 // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
 static _Atomic int64_t g_lastSurfID = 0;
@@ -767,9 +772,14 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             }
 
             // ROT-MODUS (Status-Port "rot=N"): 1=90°CW, 2=90°CCW, 3=180°, 0=aus.
-            // Letterbox-Rotation: rotieren + seitenverhältnistreu skalieren,
-            // Rest schwarz/neutral füllen (kein Verzerren wie beim alten Stretch).
+            // Fill-Rotation: rotieren + bildfüllend skalieren (Crop), das Ziel
+            // ist immer das volle iPhone-Format. VIDEO-PFAD (420v) nutzt rotv=N
+            // (eigene Richtung wegen der Rotationsmatrix im Movie-File).
             int rm = (int)atomic_load(&g_rotMode);
+            if (dstIsVideoRange) {
+                int rv = (int)atomic_load(&g_rotVidMode);
+                if (rv != 0) rm = rv;
+            }
             uint8_t rotConst = 0;
             if (rm == 1) rotConst = 1;       // kRotate90DegreesClockwise
             else if (rm == 2) rotConst = 3;  // kRotate270DegreesClockwise (CCW)
@@ -1141,6 +1151,12 @@ static void statusServerThread(void) {
                     atomic_store(&g_rotMode, nr);
                     L("ROT-Modus jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "rotv=", 5) == 0) {
+                int nv = atoi(cmd + 5);
+                if (nv >= 0 && nv <= 3) {
+                    atomic_store(&g_rotVidMode, nv);
+                    L("ROTV-Modus jetzt %d", nv);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1152,7 +1168,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotApp=%llu dup=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rotApp=%llu dup=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1187,6 +1203,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_skip420v),
             (unsigned long long)atomic_load(&g_skipPortrait),
             (long long)atomic_load(&g_rotMode),
+            (long long)atomic_load(&g_rotVidMode),
             (unsigned long long)atomic_load(&g_rotApplied),
             (unsigned long long)atomic_load(&g_dupSkip),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
