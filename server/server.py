@@ -450,6 +450,8 @@ class Pipeline:
         self.encoder = None
         self.latest_jpg = b""
         self._jpg_lock = threading.Lock()
+        self._jpg_cond = threading.Condition()
+        self._jpg_seq = 0
         self._stop = threading.Event()
         self._thread = None
         self.cur_src = None
@@ -519,12 +521,33 @@ class Pipeline:
                 if ok:
                     with self._jpg_lock:
                         self.latest_jpg = jpg.tobytes()
+                    with self._jpg_cond:
+                        self._jpg_seq += 1
+                        self._jpg_cond.notify_all()
             except Exception:
                 pass
 
     def preview(self):
         with self._jpg_lock:
             return self.latest_jpg
+
+    def preview_stream(self):
+        """Multipart-MJPEG-Generator: wartet auf neue Frames, liefert Parts."""
+        last = -1
+        while not self._stop.is_set():
+            with self._jpg_cond:
+                self._jpg_cond.wait(timeout=0.25)
+                seq = self._jpg_seq
+            if seq == last:
+                continue
+            last = seq
+            with self._jpg_lock:
+                jpg = self.latest_jpg
+            if not jpg:
+                continue
+            hdr = ("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
+                   % len(jpg)).encode()
+            yield hdr + jpg + b"\r\n"
 
 
 # ---------------------------------------------------------------- WS pusher (h264 pipe -> iPhone)
@@ -921,6 +944,8 @@ class Dashboard:
             if jpg:
                 return 200, "image/jpeg", jpg
             return 404, "text/plain", b"no preview"
+        if u.path == "/preview.mjpg":
+            return 200, "multipart/x-mixed-replace; boundary=frame", self.state["pipeline"].preview_stream()
         return 404, "text/plain", "not found"
 
     def handle_post(self, u, body, ctype):
@@ -1011,6 +1036,15 @@ def dashboard_server(state, logbuf):
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
+            if hasattr(body, "__next__") or hasattr(body, "__iter__") and not isinstance(body, (bytes, str)):
+                # Streaming-Antwort (MJPEG-Generator)
+                try:
+                    for chunk in body:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+                return
             if isinstance(body, str):
                 body = body.encode()
             self.wfile.write(body)
