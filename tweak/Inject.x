@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "rngfix-2026-09-17-01"
+#define VCAM_BUILD_ID "diagfix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -70,6 +70,8 @@ static char g_selectorDump[8192] = {0};
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
 static _Atomic int g_modeBW = 1;
 static _Atomic int g_replacementEnabled = 1;
+static _Atomic int g_useCountDelay = 1;   // "urel=N": 1=66ms-Verzögerung, 0=sofort
+static _Atomic int g_diag = 1;            // "diag=N": 0 = Tracking/Logging pro Frame aus
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
 static _Atomic uint64_t g_swapSkippedPhoto = 0;
@@ -698,15 +700,18 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
         // Der Pool kann die Surface so nicht sofort für den nächsten
         // Sensor-Frame recyceln — asynchrone Konsumenten (Preview-Ableitung,
         // Encoder) lesen nicht mehr in einen überschriebenen Buffer.
+        // Diagnose: "urel=0" schaltet die Verzögerung ab (sofortige Freigabe).
         IOSurfaceRef wSurf = CVPixelBufferGetIOSurface(dst);
         if (wSurf) {
-            IOSurfaceIncrementUseCount(wSurf);
-            CFRetain(wSurf);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 66 * NSEC_PER_MSEC),
-                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                IOSurfaceDecrementUseCount(wSurf);
-                CFRelease(wSurf);
-            });
+            if (atomic_load(&g_useCountDelay)) {
+                IOSurfaceIncrementUseCount(wSurf);
+                CFRetain(wSurf);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 66 * NSEC_PER_MSEC),
+                               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    IOSurfaceDecrementUseCount(wSurf);
+                    CFRelease(wSurf);
+                });
+            }
         }
 
         if (dw == sw && dh == sh) {
@@ -1077,9 +1082,10 @@ static void (*orig_stRender)(id self, SEL _cmd, id sampleBuffer, id input);
 // BWNodeOutput -emitSampleBuffer: (Haupt-Swap)
 static void hook_emitSampleBuffer(id self, SEL _cmd, id sampleBuffer) {
     atomic_fetch_add(&g_emitCalls, 1);
-    trackObject(self);
-    CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
-    trackObjectFrame(self, orig, NO);
+    if (atomic_load(&g_diag)) {
+        trackObject(self);
+        trackObjectFrame(self, (__bridge CMSampleBufferRef)sampleBuffer, NO);
+    }
 
     int stage = atomic_load(&g_stage);
     if (stage == 0) {
@@ -1133,7 +1139,9 @@ static void hook_emitSampleBuffer(id self, SEL _cmd, id sampleBuffer) {
 
     BOOL swapped = swapPixelsInPlace((__bridge CMSampleBufferRef)sampleBuffer);
     if (swapped) {
-        trackObjectFrame(self, orig, YES);
+        if (atomic_load(&g_diag)) {
+            trackObjectFrame(self, (__bridge CMSampleBufferRef)sampleBuffer, YES);
+        }
         orig_emitSampleBuffer(self, _cmd, sampleBuffer);
         return;
     }
@@ -1234,6 +1242,18 @@ static void statusServerThread(void) {
                     atomic_store(&g_rangeConv, nr);
                     L("RANGE-Konvertierung jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "urel=", 5) == 0) {
+                int nr = atoi(cmd + 5);
+                if (nr >= 0 && nr <= 1) {
+                    atomic_store(&g_useCountDelay, nr);
+                    L("UseCount-Delay jetzt %d", nr);
+                }
+            } else if (strncmp(cmd, "diag=", 5) == 0) {
+                int nr = atoi(cmd + 5);
+                if (nr >= 0 && nr <= 1) {
+                    atomic_store(&g_diag, nr);
+                    L("Diag jetzt %d", nr);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1245,7 +1265,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1285,6 +1305,8 @@ static void statusServerThread(void) {
             (long long)atomic_load(&g_rangeConv),
             (unsigned long long)atomic_load(&g_rotApplied),
             (unsigned long long)atomic_load(&g_dupSkip),
+            (int)atomic_load(&g_useCountDelay),
+            (int)atomic_load(&g_diag),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
@@ -1819,8 +1841,10 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
 // ---- BWImageQueueSinkNode (PREVIEW-Pfad!) ----
 static void hook_iqRender(id self, SEL _cmd, id sampleBuffer, id input) {
     CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sampleBuffer;
-    measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf, sb);
-    dumpOrientationAttachments(sb);
+    if (atomic_load(&g_diag)) {
+        measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf, sb);
+        dumpOrientationAttachments(sb);
+    }
     if (atomic_load(&g_stage) >= 3 && atomic_load(&g_replacementEnabled) &&
         !atomic_load(&g_photoInProgress) && !atomic_load(&g_recordingInProgress)) {
         if (swapPixelsInPlace(sb)) {
