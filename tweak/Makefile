@@ -16,7 +16,7 @@ TWEAK_NAME := VCamInject
 # ---- Inject: Substrate (%hook) + Video-Decoder + Photo support
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamInject_LDFLAGS := -Wl,-u,_VCamInject_start
+VCamInject_LDFLAGS := -Wl,-u,_VCamInject_start -Wl,-exported_symbol,_VCamInject_start
 VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox Accelerate IOSurface
 
 include $(THEOS)/makefiles/common.mk
