@@ -1683,6 +1683,27 @@ static void wsClientThread(void) {
                             logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
                             dumpCopyNextClasses();
                             L("Modus: REDUMP");
+                        } else if ([cmd hasPrefix:@"stage="]) {
+                            int ns = [[cmd substringFromIndex:6] intValue];
+                            if (ns >= 0 && ns <= 3) { atomic_store(&g_stage, ns); L("WS: STAGE %d", ns); }
+                        } else if ([cmd hasPrefix:@"rot="]) {
+                            int nr = [[cmd substringFromIndex:4] intValue];
+                            if (nr >= 0 && nr <= 3) { atomic_store(&g_rotMode, nr); L("WS: ROT %d", nr); }
+                        } else if ([cmd hasPrefix:@"rotv="]) {
+                            int nv = [[cmd substringFromIndex:5] intValue];
+                            if (nv >= 0 && nv <= 3) { atomic_store(&g_rotVidMode, nv); L("WS: ROTV %d", nv); }
+                        } else if ([cmd hasPrefix:@"rote="]) {
+                            int ne = [[cmd substringFromIndex:5] intValue];
+                            if (ne >= 0 && ne <= 3) { atomic_store(&g_rotEncMode, ne); L("WS: ROTE %d", ne); }
+                        } else if ([cmd hasPrefix:@"rng="]) {
+                            int nr = [[cmd substringFromIndex:4] intValue];
+                            if (nr >= 0 && nr <= 1) { atomic_store(&g_rangeConv, nr); L("WS: RNG %d", nr); }
+                        } else if ([cmd hasPrefix:@"urel="]) {
+                            int nr = [[cmd substringFromIndex:5] intValue];
+                            if (nr >= 0 && nr <= 1) { atomic_store(&g_useCountDelay, nr); L("WS: UREL %d", nr); }
+                        } else if ([cmd hasPrefix:@"diag="]) {
+                            int nr = [[cmd substringFromIndex:5] intValue];
+                            if (nr >= 0 && nr <= 1) { atomic_store(&g_diag, nr); L("WS: DIAG %d", nr); }
                         } else if ([cmd hasPrefix:@"expt="]) {
                             float f = [[cmd substringFromIndex:5] floatValue];
                             if (f > 0.0001f && f <= 1.0f) { g_metaExposure = f; L("WS: ExposureTime %.6f", f); }
