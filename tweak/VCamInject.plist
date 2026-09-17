@@ -10,6 +10,7 @@
 			<string>com.apple.cameracaptured</string>
 			<string>com.apple.corecaptured</string>
 			<string>com.apple.applecamerad</string>
+			<string>com.apple.avconferenced</string>
 		</array>
 		<key>Executables</key>
 		<array>
@@ -17,6 +18,7 @@
 			<string>cameracaptured</string>
 			<string>corecaptured</string>
 			<string>applecamerad</string>
+			<string>avconferenced</string>
 		</array>
 	</dict>
 </dict>

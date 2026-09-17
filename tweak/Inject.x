@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-probe-2"
+#define VCAM_BUILD_ID "ios18-probe-3"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -2089,17 +2089,26 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    // iOS 18 hat kein mediaserverd mehr -> Capture auf mehrere Daemons verteilt.
-    // Diagnose-Phase: in allen laden und loggen, welcher die BW-Klassen hostet.
+    // iOS 16: mediaserverd ist der Capture-Server.
+    // iOS 18: cameracaptured ist der Nachfolger (BW-Klassen + VideoToolbox-Decoder,
+    //   verifiziert über UFATM obsvcameraclone: isEqualToString@"cameracaptured").
+    //   applecamerad/corecaptured dürfen den Decoder NICHT (-> vtError -16151).
+    BOOL isActive = [proc isEqualToString:@"mediaserverd"]
+                 || [proc isEqualToString:@"cameracaptured"];
     static NSSet<NSString *> *captureProcs = nil;
     if (!captureProcs) {
         captureProcs = [NSSet setWithArray:@[
-            @"mediaserverd", @"cameracaptured", @"corecaptured", @"applecamerad"
+            @"mediaserverd", @"cameracaptured", @"corecaptured", @"applecamerad", @"avconferenced"
         ]];
     }
     if (![captureProcs containsObject:proc]) return;
     snprintf(g_procName, sizeof(g_procName), "%s", [proc UTF8String] ?: "?");
-    L("Capture-Daemon erkannt: %@", proc);
+    L("Capture-Daemon erkannt: %@ (aktiv=%d)", proc, (int)isActive);
+    if (!isActive) {
+        // Nicht-aktiver Daemon: nur beobachten, KEIN Status-Server/WS-Client,
+        // damit nicht der falsche Prozess Port 8769 gewinnt.
+        return;
+    }
 
     // LORDVCAM-STIL (1): Private Frameworks VOR dem Hooken laden.
     // Sonst existieren die BW*-Klassen beim Hooken evtl. noch nicht.
