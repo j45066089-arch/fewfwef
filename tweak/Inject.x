@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "rotvfix-2026-09-17-01"
+#define VCAM_BUILD_ID "sizefix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -88,13 +88,14 @@ static _Atomic uint64_t g_skip420v = 0;
 // sie sind Post-Rotations-Ableitungen des geswappten Sensor-Feeds.
 static _Atomic uint64_t g_skipPortrait = 0;
 // ROT-MODUS (Status-Port "rot=N"): 0=aus (Center-Crop), 1=90°CW,
-// 2=90°CCW, 3=180° — Letterbox-Rotation für alle Landscape-Ziele.
+// 2=90°CCW, 3=180° — Fill-Rotation für alle Landscape-Ziele (420f).
 static _Atomic int64_t g_rotMode = 1;
-// VIDEO-PFAD (420v-Movie-Encoder-Feed): eigene Richtung. Die Kamera-App
-// schreibt eine 90°-Rotationsmatrix ins Video-File — die Pre-Rotation des
-// Video-Pfads muss GEGENLÄUFIG sein, sonst landet das Video gedreht in der
-// Galerie. 0 = wie rot-Modus.
-static _Atomic int64_t g_rotVidMode = 2;
+// VIDEO-PFAD (420v) nach Größenklasse getrennt:
+//   g_rotVidMode: 420v AUßER 1920x1080 (Live-Preview-Feed 2304x1296) — CW.
+//   g_rotEncMode: 420v 1920x1080 (Encoder-Feed) — 180°. Die Encode-Kette
+//   rotiert nochmal CW (Pipeline) + CW (Movie-Matrix) = effektiv 180°.
+static _Atomic int64_t g_rotVidMode = 1;
+static _Atomic int64_t g_rotEncMode = 3;
 static _Atomic uint64_t g_rotApplied = 0;
 // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
 static _Atomic int64_t g_lastSurfID = 0;
@@ -688,6 +689,14 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             return NO;
         }
 
+        // ANTI-FLACKERN (LordVCAM 1fd4c-Stil): UseCount der Ziel-Surface
+        // erhöhen, solange wir schreiben. Der Pool recycelt die Surface dann
+        // erst nach unserem Decrement — der asynchrone Video-Encoder liest
+        // nicht mehr in einen halb überschriebenen/weiterverwendeten Buffer
+        // (das war das Flackern während der Aufnahme).
+        IOSurfaceRef wSurf = CVPixelBufferGetIOSurface(dst);
+        if (wSurf) IOSurfaceIncrementUseCount(wSurf);
+
         if (dw == sw && dh == sh) {
             // Same-size: stride-aware Kopie. RECORDING-FIX: Wenn das Ziel
             // 420v (Video-Range) ist und die Quelle 420f (Full-Range),
@@ -777,8 +786,13 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             // (eigene Richtung wegen der Rotationsmatrix im Movie-File).
             int rm = (int)atomic_load(&g_rotMode);
             if (dstIsVideoRange) {
-                int rv = (int)atomic_load(&g_rotVidMode);
-                if (rv != 0) rm = rv;
+                if (dw == 1920 && dh == 1080) {
+                    int re = (int)atomic_load(&g_rotEncMode);
+                    if (re != 0) rm = re;
+                } else {
+                    int rv = (int)atomic_load(&g_rotVidMode);
+                    if (rv != 0) rm = rv;
+                }
             }
             uint8_t rotConst = 0;
             if (rm == 1) rotConst = 1;       // kRotate90DegreesClockwise
@@ -858,6 +872,9 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             atomic_fetch_add(&g_inplaceScaled, 1);
             }   // Ende Center-Crop-Zweig
         }
+
+        // UseCount der Ziel-Surface wieder freigeben (Antiflacker-Guard).
+        if (wSurf) IOSurfaceDecrementUseCount(wSurf);
 
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         CVPixelBufferUnlockBaseAddress(dst, 0);
@@ -1157,6 +1174,12 @@ static void statusServerThread(void) {
                     atomic_store(&g_rotVidMode, nv);
                     L("ROTV-Modus jetzt %d", nv);
                 }
+            } else if (strncmp(cmd, "rote=", 5) == 0) {
+                int ne = atoi(cmd + 5);
+                if (ne >= 0 && ne <= 3) {
+                    atomic_store(&g_rotEncMode, ne);
+                    L("ROTE-Modus jetzt %d", ne);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1168,7 +1191,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rotApp=%llu dup=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rotApp=%llu dup=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1204,6 +1227,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_skipPortrait),
             (long long)atomic_load(&g_rotMode),
             (long long)atomic_load(&g_rotVidMode),
+            (long long)atomic_load(&g_rotEncMode),
             (unsigned long long)atomic_load(&g_rotApplied),
             (unsigned long long)atomic_load(&g_dupSkip),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
