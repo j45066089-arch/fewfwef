@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "samesizefix-2026-09-17-01"
+#define VCAM_BUILD_ID "rngfix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -96,6 +96,10 @@ static _Atomic int64_t g_rotMode = 1;
 //   Feed beim Speichern nochmal CW90 (Matrix) — CCW-Inhalt wird dadurch aufrecht.
 static _Atomic int64_t g_rotVidMode = 1;
 static _Atomic int64_t g_rotEncMode = 2;
+// RANGE-KONVERTIERUNG (Status-Port "rng=N"): 0=aus (Pipeline behandelt die
+// 420v-Buffer intern als Full-Range — Konvertieren wäscht Farben aus),
+// 1=an (Full->Video wie früher).
+static _Atomic int64_t g_rangeConv = 0;
 static _Atomic uint64_t g_rotApplied = 0;
 // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
 static _Atomic int64_t g_lastSurfID = 0;
@@ -689,13 +693,21 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             return NO;
         }
 
-        // ANTI-FLACKERN (LordVCAM 1fd4c-Stil): UseCount der Ziel-Surface
-        // erhöhen, solange wir schreiben. Der Pool recycelt die Surface dann
-        // erst nach unserem Decrement — der asynchrone Video-Encoder liest
-        // nicht mehr in einen halb überschriebenen/weiterverwendeten Buffer
-        // (das war das Flackern während der Aufnahme).
+        // ANTI-FLACKERN (LordVCAM 1fd4c-Stil, verzögert): UseCount der
+        // Ziel-Surface erhöhen und erst nach ~66ms (2 Frames) freigeben.
+        // Der Pool kann die Surface so nicht sofort für den nächsten
+        // Sensor-Frame recyceln — asynchrone Konsumenten (Preview-Ableitung,
+        // Encoder) lesen nicht mehr in einen überschriebenen Buffer.
         IOSurfaceRef wSurf = CVPixelBufferGetIOSurface(dst);
-        if (wSurf) IOSurfaceIncrementUseCount(wSurf);
+        if (wSurf) {
+            IOSurfaceIncrementUseCount(wSurf);
+            CFRetain(wSurf);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 66 * NSEC_PER_MSEC),
+                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                IOSurfaceDecrementUseCount(wSurf);
+                CFRelease(wSurf);
+            });
+        }
 
         if (dw == sw && dh == sh) {
             // Same-size: stride-aware Kopie. RECORDING-FIX: Wenn das Ziel
@@ -707,8 +719,10 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             BOOL srcVideoRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             BOOL dstFullRange  = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
             ConvFn convY = NULL, convC = NULL;
-            if (srcFullRange && dstVideoRange) { convY = fullToVideoY; convC = fullToVideoC; }
-            else if (srcVideoRange && dstFullRange) { convY = videoToFullY; convC = videoToFullC; }
+            if (atomic_load(&g_rangeConv)) {
+                if (srcFullRange && dstVideoRange) { convY = fullToVideoY; convC = fullToVideoC; }
+                else if (srcVideoRange && dstFullRange) { convY = videoToFullY; convC = videoToFullC; }
+            }
 
             // ENCODER-FEED-FIX: Der 1920x1080-420v-Feed (Movie-Encoder) trifft
             // HIER (gleiche Größe wie die Decoder-Quelle) — vorher wurde er
@@ -807,12 +821,14 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             BOOL dstIsVideoRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             BOOL srcIsVideoRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             ConvFn convY = NULL, convC = NULL;
-            if (srcFullRange && dstIsVideoRange) {
-                convY = fullToVideoY;
-                convC = fullToVideoC;
-            } else if (srcIsVideoRange && dstFullRange) {
-                convY = videoToFullY;
-                convC = videoToFullC;
+            if (atomic_load(&g_rangeConv)) {
+                if (srcFullRange && dstIsVideoRange) {
+                    convY = fullToVideoY;
+                    convC = fullToVideoC;
+                } else if (srcIsVideoRange && dstFullRange) {
+                    convY = videoToFullY;
+                    convC = videoToFullC;
+                }
             }
 
             // ROT-MODUS (Status-Port "rot=N"): 1=90°CW, 2=90°CCW, 3=180°, 0=aus.
@@ -907,9 +923,6 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             atomic_fetch_add(&g_inplaceScaled, 1);
             }   // Ende Center-Crop-Zweig
         }
-
-        // UseCount der Ziel-Surface wieder freigeben (Antiflacker-Guard).
-        if (wSurf) IOSurfaceDecrementUseCount(wSurf);
 
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         CVPixelBufferUnlockBaseAddress(dst, 0);
@@ -1215,6 +1228,12 @@ static void statusServerThread(void) {
                     atomic_store(&g_rotEncMode, ne);
                     L("ROTE-Modus jetzt %d", ne);
                 }
+            } else if (strncmp(cmd, "rng=", 4) == 0) {
+                int nr = atoi(cmd + 4);
+                if (nr >= 0 && nr <= 1) {
+                    atomic_store(&g_rangeConv, nr);
+                    L("RANGE-Konvertierung jetzt %d", nr);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1226,7 +1245,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rotApp=%llu dup=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1263,6 +1282,7 @@ static void statusServerThread(void) {
             (long long)atomic_load(&g_rotMode),
             (long long)atomic_load(&g_rotVidMode),
             (long long)atomic_load(&g_rotEncMode),
+            (long long)atomic_load(&g_rangeConv),
             (unsigned long long)atomic_load(&g_rotApplied),
             (unsigned long long)atomic_load(&g_dupSkip),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
