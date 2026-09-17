@@ -511,11 +511,11 @@ class Pipeline:
             out = compose_frame(frame, WIDTH, HEIGHT, self.state["transform"])
             out = apply_filters(out, self.state["filters"])
             self.encoder.send(out)
-            # preview JPEG (höhere Auflösung + Qualität fürs Dashboard)
+            # preview JPEG (kleiner + schneller fürs Dashboard: 720px, Q80)
             try:
-                small = cv2.resize(out, (960, int(960 * HEIGHT / WIDTH)),
+                small = cv2.resize(out, (720, int(720 * HEIGHT / WIDTH)),
                                    interpolation=cv2.INTER_AREA)
-                ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if ok:
                     with self._jpg_lock:
                         self.latest_jpg = jpg.tobytes()

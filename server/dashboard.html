@@ -224,7 +224,7 @@
     </div>
     <div class="preview" id="pBox">
       <div class="empty" id="pEmpty">no source active</div>
-      <img id="pImg" style="display:none">
+      <img id="pImg" style="display:none" decoding="async">
       <div class="cropov" id="cropVideo"><span>VIDEO 9:16</span></div>
       <div class="cropov" id="cropPhoto"><span>FOTO 3:4</span></div>
     </div>
@@ -482,8 +482,10 @@ async function poll() {
     if (s.running) {
       $('pImg').style.display = '';
       $('pEmpty').style.display = 'none';
-      $('pImg').src = '/preview.jpg?t=' + Date.now();
+      if (!gRunning) refreshPreview();   // sofortiges Bild beim Start
+      gRunning = true;
     } else {
+      gRunning = false;
       $('pImg').style.display = 'none';
       if (!$('pEmpty').textContent.includes('uploading')) $('pEmpty').textContent = 'no source active';
       $('pEmpty').style.display = '';
@@ -498,8 +500,15 @@ function fmtUp(s) {
   const m = Math.floor(s/60), sec = s%60;
   return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
 }
+// ── Schnelle Vorschau (100ms), unabhängig vom Stats-Poll ──
+let gRunning = false;
+function refreshPreview() {
+  if (!gRunning) return;
+  $('pImg').src = '/preview.jpg?t=' + Date.now();
+}
 loadCams(); poll(); setInterval(poll, 500);
 pollDev(); setInterval(pollDev, 2000);
+setInterval(refreshPreview, 100);
 setInterval(updPipe, 1000);
 setInterval(placeCrops, 2000);
 window.addEventListener('resize', placeCrops);
