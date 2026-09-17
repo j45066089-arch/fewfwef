@@ -201,6 +201,19 @@
     </div>
 
     <div class="card">
+      <div class="card-title">Authenticity · Metadaten</div>
+      <div class="filter-row"><label>ExposureTime</label><input type="range" id="aExpt" min="2" max="1000" value="120"><span id="aExptV">1/120</span></div>
+      <div class="filter-row"><label>SNR (Rauschen)</label><input type="range" id="aSnr" min="0" max="60" value="24"><span id="aSnrV">24.0</span></div>
+      <div class="filter-row"><label>ISO</label><input type="range" id="aIso" min="0" max="3200" step="50" value="0"><span id="aIsoV">auto</span></div>
+      <div class="row" style="margin-top:8px">
+        <label>Metadata</label>
+        <button class="btn btn-sm dbtn" data-mode="mdon" data-val="1" onclick="devCmd('mdon=1')">ON</button>
+        <button class="btn btn-sm dbtn" data-mode="mdon" data-val="0" onclick="devCmd('mdon=0')">OFF</button>
+      </div>
+      <div class="hint" style="margin-top:8px">LuxLevel wird automatisch aus der Video-Helligkeit berechnet · ISO 0 = auto · SensorID bleibt echt. Läuft über den WS-Kanal (kein SSH nötig).</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Filters</div>
       <div class="filter-row"><label>Brightness</label><input type="range" id="fB" min="-100" max="100" value="0"><span id="fBv">0.00</span></div>
       <div class="filter-row"><label>Contrast</label><input type="range" id="fC" min="25" max="400" value="100"><span id="fCv">1.00</span></div>
@@ -367,7 +380,7 @@ function setSource(m) {
   $('fileCfg').style.display = m==='file' ? '' : 'none';
   $('bFile').style.background = m==='file' ? 'rgba(0,204,230,.2)' : '';
   $('bCam').style.background = m==='cam' ? 'rgba(0,204,230,.2)' : '';
-  if (m==='cam') ctrl('set_source', {source_type:'local', camera_id:parseInt($('camSel').value)||0});
+  if (m==='cam') ctrl('set_source', {source_type:'local', camera_id:$('camSel').value || 'OBS Virtual Camera'});
 }
 function setFps(f) {
   ctrl('fps', {fps:f});
@@ -383,7 +396,7 @@ $('fUpload').onchange = async e => {
   const j = await r.json();
   $('pEmpty').textContent = j.error || 'source active';
 };
-$('camSel').onchange = () => ctrl('set_source', {source_type:'local', camera_id:parseInt($('camSel').value)||0});
+$('camSel').onchange = () => ctrl('set_source', {source_type:'local', camera_id:$('camSel').value});
 
 // ── Filters ──
 const fmap = { fB:'brightness', fC:'contrast', fS:'saturation', fG:'gamma' };
@@ -424,6 +437,26 @@ function devCmd(cmd) {
       if (d && d.connected) pollDev();
     }).catch(()=>{});
 }
+// ── Authenticity-Steuerung (via WS-Kanal, kein SSH nötig) ──
+function authCmd(cmd) {
+  fetch('/api/device_cmd', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({cmd}) }).then(r=>r.json()).catch(()=>{});
+}
+$('aExpt').oninput = () => {
+  const v = parseInt($('aExpt').value) || 120;
+  $('aExptV').textContent = '1/' + v;
+  authCmd('expt=' + (1/v).toFixed(6));
+};
+$('aSnr').oninput = () => {
+  const v = parseFloat($('aSnr').value) || 24;
+  $('aSnrV').textContent = v.toFixed(1);
+  authCmd('snr=' + v.toFixed(1));
+};
+$('aIso').oninput = () => {
+  const v = parseInt($('aIso').value) || 0;
+  $('aIsoV').textContent = v === 0 ? 'auto' : String(v);
+  authCmd('iso=' + v);
+};
 async function pollDev() {
   try {
     const r = await fetch('/api/device');
@@ -464,13 +497,13 @@ async function loadCams() {
   try {
     const r = await fetch('/api/cameras'); const cams = await r.json();
     $('camSel').innerHTML = '';
-    let obs = 0;
-    cams.forEach((c,i) => {
-      const o = document.createElement('option'); o.value=i; o.textContent=c;
+    let obs = '';
+    cams.forEach(c => {
+      const o = document.createElement('option'); o.value=c; o.textContent=c;
       $('camSel').appendChild(o);
-      if (!obs && c.toLowerCase().includes('obs')) obs = i;
+      if (!obs && c.toLowerCase().includes('obs')) obs = c;
     });
-    $('camSel').value = obs;
+    if (cams.length) $('camSel').value = obs || cams[0];
   } catch(e) {}
 }
 async function poll() {

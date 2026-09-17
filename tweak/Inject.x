@@ -78,6 +78,7 @@ static _Atomic int64_t g_videoLuma = 0;   // mittlere Luminanz des OBS-Frames (0
 static _Atomic int64_t g_videoLux = 0;    // daraus abgeleitetes LuxLevel
 static float g_metaExposure = 0.008333f;  // "expt=" Belichtungszeit (Sekunden)
 static float g_metaSnr = 24.0f;           // "snr=" Rauschmaß (dB-artig)
+static _Atomic int64_t g_metaIso = 0;     // "iso=" (0 = auto aus LuxLevel)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
 static _Atomic uint64_t g_swapSkippedPhoto = 0;
@@ -1011,16 +1012,22 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             int64_t lux = atomic_load(&g_videoLux);
             float expt = g_metaExposure;
             float snr = g_metaSnr;
+            int64_t isoCfg = atomic_load(&g_metaIso);
+            int64_t iso = isoCfg > 0 ? isoCfg
+                        : (int64_t)(120000.0 / (double)(lux + 1));
+            if (iso < 50) iso = 50;
+            if (iso > 3200) iso = 3200;
             CFNumberRef exptN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &expt);
             CFNumberRef luxN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &lux);
+            CFNumberRef isoN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &iso);
             CFNumberRef snrN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &snr);
             CFNumberRef snrNorm = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &snr);
 
-            const void *keys[] = { CFSTR("ExposureTime"), CFSTR("LuxLevel"),
+            const void *keys[] = { CFSTR("ExposureTime"), CFSTR("LuxLevel"), CFSTR("ISO"),
                                    CFSTR("SNR"), CFSTR("NormalizedSNR") };
-            const void *vals[] = { exptN, luxN, snrN, snrNorm };
+            const void *vals[] = { exptN, luxN, isoN, snrN, snrNorm };
             CFDictionaryRef newMeta = CFDictionaryCreate(
-                kCFAllocatorDefault, keys, vals, 4,
+                kCFAllocatorDefault, keys, vals, 5,
                 &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
             CVBufferSetAttachment(dst, (CFStringRef)@"MetadataDictionary",
                 newMeta, kCVAttachmentMode_ShouldPropagate);
@@ -1037,8 +1044,8 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                     CFRelease(mut);
                 }
             }
-            CFRelease(exptN); CFRelease(luxN); CFRelease(snrN); CFRelease(snrNorm);
-            CFRelease(newMeta);
+            CFRelease(exptN); CFRelease(luxN); CFRelease(isoN);
+            CFRelease(snrN); CFRelease(snrNorm); CFRelease(newMeta);
         }
     }
 
@@ -1337,6 +1344,12 @@ static void statusServerThread(void) {
                     g_metaExposure = f;
                     L("ExposureTime jetzt %.6f", f);
                 }
+            } else if (strncmp(cmd, "iso=", 4) == 0) {
+                int ni = atoi(cmd + 4);
+                if (ni >= 0 && ni <= 200000) {
+                    atomic_store(&g_metaIso, ni);
+                    L("ISO jetzt %d", ni);
+                }
             } else if (strncmp(cmd, "snr=", 4) == 0) {
                 float f = strtof(cmd + 4, NULL);
                 if (f > 0.0f && f <= 100.0f) {
@@ -1354,7 +1367,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d luma=%lld lux=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1399,6 +1412,9 @@ static void statusServerThread(void) {
             (int)atomic_load(&g_metaOn),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
+            (double)g_metaExposure,
+            (double)g_metaSnr,
+            (long long)atomic_load(&g_metaIso),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
@@ -1667,6 +1683,18 @@ static void wsClientThread(void) {
                             logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
                             dumpCopyNextClasses();
                             L("Modus: REDUMP");
+                        } else if ([cmd hasPrefix:@"expt="]) {
+                            float f = [[cmd substringFromIndex:5] floatValue];
+                            if (f > 0.0001f && f <= 1.0f) { g_metaExposure = f; L("WS: ExposureTime %.6f", f); }
+                        } else if ([cmd hasPrefix:@"snr="]) {
+                            float f = [[cmd substringFromIndex:4] floatValue];
+                            if (f > 0.0f && f <= 100.0f) { g_metaSnr = f; L("WS: SNR %.1f", f); }
+                        } else if ([cmd hasPrefix:@"iso="]) {
+                            int ni = [[cmd substringFromIndex:4] intValue];
+                            if (ni >= 0 && ni <= 200000) { atomic_store(&g_metaIso, ni); L("WS: ISO %d", ni); }
+                        } else if ([cmd hasPrefix:@"mdon="]) {
+                            int nm = [[cmd substringFromIndex:5] intValue];
+                            if (nm >= 0 && nm <= 1) { atomic_store(&g_metaOn, nm); L("WS: MDON %d", nm); }
                         }
                     }
                     free(payload);

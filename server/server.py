@@ -37,6 +37,7 @@ import socket
 import subprocess
 import sys
 import threading
+import queue
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -46,6 +47,8 @@ import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("vcam")
+# paramiko loggt SSH-Banner-Fehler bei jedem Reconnect als ERROR-Spam → leise schalten
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 DASHBOARD_PORT = 8080
 DEFAULT_DEVICE = "OBS Virtual Camera"
@@ -566,6 +569,14 @@ class FramePusher:
         self.pipe, self.ip, self.port = pipe, ip, port
         self.state = state
         self._closed = False
+        self.cmd_queue = queue.Queue()
+
+    def send_cmd(self, cmd):
+        """Thread-safe: Text-Befehl ueber den bestehenden WS an Hub->mediaserverd."""
+        try:
+            self.cmd_queue.put_nowait(str(cmd)[:64])
+        except Exception:
+            pass
 
     async def run(self):
         from websockets.asyncio.client import connect
@@ -747,6 +758,14 @@ class FramePusher:
                                 await flush_au(ws)
                             elif t == 1 or t == 5 or t == 6:
                                 cur_au.append(nal)
+                        # Steuerbefehle (WS-Text) absetzen: PC -> Hub -> mediaserverd (ohne SSH)
+                        try:
+                            while True:
+                                cmd = self.cmd_queue.get_nowait()
+                                await ws.send(cmd)
+                                self.state["ws_cmds"] = self.state.get("ws_cmds", 0) + 1
+                        except queue.Empty:
+                            pass
                         await asyncio.sleep(0.001)
             except Exception as e:
                 self.state["connected"] = False
@@ -802,6 +821,8 @@ class DeviceBridge:
         self.cache = {"connected": False, "error": ""}
         self.cache_ts = 0.0
         self.last_err = ""
+        self._fail = 0          # aufeinanderfolgende SSH-Fehler (Backoff)
+        self._retry_in = 2.0    # nächstes Poll-Intervall in s""
 
     def _connect(self):
         import paramiko
@@ -840,10 +861,12 @@ class DeviceBridge:
 
     def get_status(self, force=False):
         now = time.time()
-        if not force and now - self.cache_ts < 2.0:
+        if not force and now - self.cache_ts < self._retry_in:
             return self.cache
         res = {"connected": False, "error": ""}
         if self._ensure():
+            self._fail = 0
+            self._retry_in = 2.0
             try:
                 txt = self._read_status()
                 res = self._parse(txt)
@@ -874,6 +897,8 @@ class DeviceBridge:
                 res["error"] = str(e)[:120]
                 self.client = None
         else:
+            self._fail += 1
+            self._retry_in = min(2.0 * (2 ** min(self._fail, 4)), 30.0)
             res["error"] = self.last_err or "SSH nicht erreichbar"
         self.cache = res
         self.cache_ts = now
@@ -904,9 +929,13 @@ class DeviceBridge:
     def _parse(txt):
         out = {}
         for k in ("stage", "rxNal", "emit", "inplace", "rotApp", "dup",
-                  "errors", "hasFrame", "skipPort", "rot", "rotv", "rote", "rng"):
+                  "errors", "hasFrame", "skipPort", "rot", "rotv", "rote", "rng",
+                  "mdon", "iso", "lux", "luma"):
             m = re.search(re.escape(k) + r"=(-?\d+)", txt)
             out[k] = int(m.group(1)) if m else 0
+        for k in ("expt", "snr"):
+            m = re.search(re.escape(k) + r"=([\d.]+)", txt)
+            out[k] = float(m.group(1)) if m else 0.0
         m = re.search(r"build=(\S+)", txt)
         out["build"] = m.group(1) if m else "?"
         return out
@@ -970,8 +999,17 @@ class Dashboard:
             except Exception:
                 return 400, "application/json", json.dumps({"error": "bad json"})
             cmd = str(msg.get("cmd", ""))[:32]
-            if not re.match(r"^(stage|rot|rotv|rote|rng)=[0-3]$", cmd):
+            ok = (re.match(r"^(stage|rot|rotv|rote|rng|urel|diag|mdon)=[0-3]$", cmd)
+                  or re.match(r"^(expt|snr)=[0-9.]+$", cmd)
+                  or re.match(r"^iso=[0-9]+$", cmd))
+            if not ok:
                 return 400, "application/json", json.dumps({"error": "cmd"})
+            # 1) WS-Kanal (ohne SSH, nur wenn der Tweak verbunden ist)
+            pusher = self.state.get("pusher")
+            if pusher is not None and self.state.get("connected"):
+                pusher.send_cmd(cmd)
+                return 200, "application/json", json.dumps({"ok": True, "via": "ws"})
+            # 2) Fallback: SSH -> Status-Port 8769
             return 200, "application/json", json.dumps(self.device.send_cmd(cmd))
         if u.path == "/api/upload":
             fields = parse_multipart(body, ctype)
@@ -997,7 +1035,10 @@ class Dashboard:
             t = msg.get("type")
             if t == "set_source":
                 if msg.get("source_type") == "local":
-                    st["want"] = ("cam", str(msg.get("camera_id") or 0))
+                    cam = msg.get("camera_id")
+                    if cam in (None, "", 0, "0"):
+                        cam = DEFAULT_DEVICE   # OBS Virtual Camera per NAME (ffmpeg-dshow)
+                    st["want"] = ("cam", str(cam))
                 elif msg.get("video_path"):
                     st["want"] = ("file", msg["video_path"])
                 st["start_time"] = time.time()
@@ -1135,6 +1176,7 @@ async def main():
             return enc.pipe if enc else ""
     pusher = FramePusher(PipeResolver(pipeline).get(), a.ip, a.port, state)
     pusher.pipe_resolver = PipeResolver(pipeline)
+    state["pusher"] = pusher
     asyncio.create_task(pusher.run())
 
     try:
