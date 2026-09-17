@@ -1,0 +1,48 @@
+name: Build VCamProbe
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'probe/**'
+      - '.github/workflows/build_probe.yml'
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Roothide Theos
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          test -f "$HOME/theos/vendor/mod/roothide/package/deb.mk"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          git -C "$HOME/theos" rev-parse HEAD
+
+      - name: Install packaging dependencies
+        run: brew install ldid dpkg xz
+
+      - name: Build roothide package
+        working-directory: probe
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
+      - name: Inspect package
+        working-directory: probe
+        run: |
+          for package in packages/*.deb; do
+            test "$(dpkg-deb -f "$package" Architecture)" = iphoneos-arm64e
+            dpkg-deb -I "$package"
+            dpkg-deb -c "$package"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vcamprobe-roothide-deb
+          path: probe/packages/*.deb
+          if-no-files-found: error

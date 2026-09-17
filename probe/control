@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcamprobe
+Name: VCamProbe
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: Minimal diagnostics dylib (ctor + file log)
+Maintainer: nikeboy
+Author: nikeboy
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
