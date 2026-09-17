@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "portraitfix-2026-09-17-01"
+#define VCAM_BUILD_ID "rotmode-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -87,6 +87,10 @@ static _Atomic uint64_t g_skip420v = 0;
 // GUARD (Preview): Porträt-Buffer (h>w) werden NICHT direkt geswappt —
 // sie sind Post-Rotations-Ableitungen des geswappten Sensor-Feeds.
 static _Atomic uint64_t g_skipPortrait = 0;
+// ROT-MODUS (Status-Port "rot=N"): 0=aus (Center-Crop), 1=90°CW,
+// 2=90°CCW, 3=180° — Letterbox-Rotation für alle Landscape-Ziele.
+static _Atomic int64_t g_rotMode = 1;
+static _Atomic uint64_t g_rotApplied = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -463,6 +467,87 @@ static void rotateScaleUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW,
     free(tmp);
 }
 
+// ---------------------------------------------------------------- Letterbox-Rotation (rot=N)
+// Rotiert src (90°/180°) und skaliert SEITENVERHÄLTNISTREU in dst hinein;
+// der Rest wird mit fillV (Schwarz je Range) gefüllt. Kein Verzerren —
+// das war der Fehler der alten Rotate+Stretch-Kombination.
+// 90°: rotW=srcH, rotH=srcW. 180°: rotW=srcW, rotH=srcH.
+static void rotateFitPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                           uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                           uint8_t rotConst, ConvFn conv, uint8_t fillV) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    size_t rotW = (rotConst == 2) ? srcW : srcH;
+    size_t rotH = (rotConst == 2) ? srcH : srcW;
+    if (rotW > SIZE_MAX / rotH) return;
+    uint8_t *tmp = malloc(rotW * rotH);
+    if (!tmp) return;
+    vImage_Buffer srcBuf = { (void *)sp, srcH, srcW, srcStride };
+    vImage_Buffer tmpBuf = { tmp, rotH, rotW, rotW };
+    vImage_Error err = vImageRotate90_Planar8(&srcBuf, &tmpBuf, rotConst, 0, kvImageNoFlags);
+    if (err != kvImageNoError) { free(tmp); return; }
+    // Aspect-Fit: rotiertes Bild vollständig, mittig, schwarz außen.
+    size_t fitW, fitH;
+    if (rotW * dstH <= dstW * rotH) { fitH = dstH; fitW = rotW * dstH / rotH; }
+    else { fitW = dstW; fitH = rotH * dstW / rotW; }
+    fitW &= ~(size_t)1; fitH &= ~(size_t)1;
+    if (fitW < 2 || fitH < 2) { free(tmp); return; }
+    size_t offX = (dstW - fitW) / 2;
+    size_t offY = (dstH - fitH) / 2;
+    for (size_t y = 0; y < dstH; y++) memset(dp + y * dstStride, fillV, dstW);
+    vImage_Buffer dstSub = { dp + offY * dstStride + offX, fitH, fitW, dstStride };
+    err = vImageScale_Planar8(&tmpBuf, &dstSub, NULL, kvImageNoFlags);
+    if (err == kvImageNoError && conv) {
+        static uint8_t lutY[256]; static BOOL lutYInit = NO;
+        if (!lutYInit) { for (int i = 0; i < 256; i++) lutY[i] = conv((uint8_t)i); lutYInit = YES; }
+        vImageTableLookUp_Planar8(&dstSub, &dstSub, lutY, kvImageNoFlags);
+    }
+    free(tmp);
+}
+
+// UV-Plane: 16-bit-interleaved CbCr — Hintergrund neutral 0x8080, Rotation
+// als Planar16U (CbCr-Paare bleiben zusammen), danach Integer-Scale in die
+// Fit-Region (wie rotateScaleUVPlane).
+static void rotateFitUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                             uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                             uint8_t rotConst, ConvFn conv) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    size_t rotW = (rotConst == 2) ? srcW : srcH;
+    size_t rotH = (rotConst == 2) ? srcH : srcW;
+    if (rotW > SIZE_MAX / rotH) return;
+    uint8_t *tmp = malloc(rotW * rotH * 2);
+    if (!tmp) return;
+    size_t srcRow = srcStride & ~(size_t)1;
+    size_t tmpRow = rotW * 2;
+    vImage_Buffer srcBuf = { (void *)sp, srcH, srcW, srcRow };
+    vImage_Buffer tmpBuf = { tmp, rotH, rotW, tmpRow };
+    vImage_Error err = vImageRotate90_Planar16U(&srcBuf, &tmpBuf, rotConst, 0x8080, kvImageNoFlags);
+    if (err != kvImageNoError) { free(tmp); return; }
+    size_t fitW, fitH;
+    if (rotW * dstH <= dstW * rotH) { fitH = dstH; fitW = rotW * dstH / rotH; }
+    else { fitW = dstW; fitH = rotH * dstW / rotW; }
+    fitW &= ~(size_t)1; fitH &= ~(size_t)1;
+    if (fitW < 2 || fitH < 2) { free(tmp); return; }
+    size_t offX = (dstW - fitW) / 2;
+    size_t offY = (dstH - fitH) / 2;
+    for (size_t y = 0; y < dstH; y++) {
+        uint8_t *row = dp + y * dstStride;
+        for (size_t x = 0; x < dstW; x++) { row[x * 2] = 0x80; row[x * 2 + 1] = 0x80; }
+    }
+    for (size_t y = 0; y < fitH; y++) {
+        size_t ry = y * rotH / fitH;
+        uint8_t *dstRow = dp + (offY + y) * dstStride + offX * 2;
+        const uint8_t *srcRow = tmp + ry * tmpRow;
+        for (size_t x = 0; x < fitW; x++) {
+            size_t rx = x * rotW / fitW;
+            uint8_t cb = srcRow[rx * 2];
+            uint8_t cr = srcRow[rx * 2 + 1];
+            dstRow[x * 2]     = conv ? conv(cb) : cb;
+            dstRow[x * 2 + 1] = conv ? conv(cr) : cr;
+        }
+    }
+    free(tmp);
+}
+
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
@@ -665,7 +750,30 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 convC = videoToFullC;
             }
 
-            if (rotDeg != 0) {
+            // ROT-MODUS (Status-Port "rot=N"): 1=90°CW, 2=90°CCW, 3=180°, 0=aus.
+            // Letterbox-Rotation: rotieren + seitenverhältnistreu skalieren,
+            // Rest schwarz/neutral füllen (kein Verzerren wie beim alten Stretch).
+            int rm = (int)atomic_load(&g_rotMode);
+            uint8_t rotConst = 0;
+            if (rm == 1) rotConst = 1;       // kRotate90DegreesClockwise
+            else if (rm == 2) rotConst = 3;  // kRotate270DegreesClockwise (CCW)
+            else if (rm == 3) rotConst = 2;  // kRotate180DegreesClockwise
+
+            if (rotConst) {
+                uint8_t fillY = dstIsVideoRange ? 0x10 : 0x00;
+                rotateFitPlane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
+                               CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
+                               CVPixelBufferGetBaseAddressOfPlane(dst, 0),
+                               CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
+                               rotConst, convY, fillY);
+                rotateFitUVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+                                 CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
+                                 CVPixelBufferGetBaseAddressOfPlane(dst, 1),
+                                 CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
+                                 rotConst, convC);
+                ok = YES;
+                atomic_fetch_add(&g_rotApplied, 1);
+            } else if (rotDeg != 0) {
                 // LordVCAM-Pfad 2 (Disassembly 0x4d590-0x4d5ac, verifiziert):
                 //   90°  -> Konstante 3 = kRotate270DegreesClockwise (effektiv CCW)
                 //   180° -> Konstante 2 = kRotate180DegreesClockwise
@@ -1012,6 +1120,12 @@ static void statusServerThread(void) {
                     atomic_store(&g_stage, ns);
                     L("STAGE jetzt %d", ns);
                 }
+            } else if (strncmp(cmd, "rot=", 4) == 0) {
+                int nr = atoi(cmd + 4);
+                if (nr >= 0 && nr <= 3) {
+                    atomic_store(&g_rotMode, nr);
+                    L("ROT-Modus jetzt %d", nr);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1023,7 +1137,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotApp=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1057,6 +1171,8 @@ static void statusServerThread(void) {
             (int)atomic_load(&g_replacementEnabled),
             (unsigned long long)atomic_load(&g_skip420v),
             (unsigned long long)atomic_load(&g_skipPortrait),
+            (long long)atomic_load(&g_rotMode),
+            (unsigned long long)atomic_load(&g_rotApplied),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
