@@ -1,8 +1,8 @@
-Package: com.nikeboy.vcamprobe2
-Name: VCamProbe2
+Package: com.nikeboy.vcamprobe3
+Name: VCamProbe3
 Version: 0.0.1
 Architecture: iphoneos-arm64
-Description: Pure-C ctor diagnostic (no Foundation/objc)
+Description: Socket-based ctor diagnostic (binds port 8799)
 Maintainer: nikeboy
 Author: nikeboy
 Section: Tweaks
