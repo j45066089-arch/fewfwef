@@ -1064,7 +1064,7 @@ def dashboard_server(state, logbuf):
         def log_message(self, *a):
             pass
 
-    ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), H).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", DASHBOARD_PORT), H).serve_forever()
 
 
 # ---------------------------------------------------------------- main

@@ -509,8 +509,21 @@ function fmtUp(s) {
   const m = Math.floor(s/60), sec = s%60;
   return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
 }
-// ── Vorschau: MJPEG-Stream (kein Polling, kein Flackern) ──
+// ── Vorschau: MJPEG-Stream; Safari-Fallback auf JPEG-Polling ──
 let gRunning = false;
+const isSafari = /Safari/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|OPR|CriOS|FxiOS/i.test(navigator.userAgent);
+function startPreview() {
+  if (isSafari) {
+    $('pImg').src = '/preview.jpg?t=' + Date.now();
+    if (!window._pvTimer) {
+      window._pvTimer = setInterval(() => {
+        if (gRunning && !drag) $('pImg').src = '/preview.jpg?t=' + Date.now();
+      }, 150);
+    }
+  } else {
+    $('pImg').src = '/preview.mjpg';
+  }
+}
 loadCams(); poll(); setInterval(poll, 500);
 pollDev(); setInterval(pollDev, 2000);
 setInterval(updPipe, 1000);
