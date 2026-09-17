@@ -266,9 +266,20 @@ function sendTransform(force) {
 }
 function updInfo() { $('pInfo').textContent = tr.zoom.toFixed(1)+'x | '+tr.panX.toFixed(2)+', '+tr.panY.toFixed(2)+(tr.rotation?' | '+tr.rotation+'°':'')+(tr.flipH?' | MIRROR':''); }
 
-// ── Drag = Pan, Wheel = Zoom ──
+// ── Drag = Pan, Wheel = Zoom (mit lokaler CSS-Vorschau: Bild folgt Maus sofort) ──
 const box = $('pBox');
+const pImgEl = $('pImg');
 let drag = null;
+let serverTr = null;   // zuletzt vom Server bestätigter Transform (Echo)
+function localPreview() {
+  if (!serverTr || !gRunning || !pImgEl.style.display) return;
+  const dz = (serverTr.zoom && tr.zoom) ? tr.zoom / serverTr.zoom : 1;
+  const bw = box.clientWidth || 1, bh = box.clientHeight || 1;
+  const dx = (tr.panX - (serverTr.pan_x || 0)) * (bw / 2);
+  const dy = (tr.panY - (serverTr.pan_y || 0)) * (bh / 2);
+  pImgEl.style.transform = `translate(${dx}px, ${dy}px) scale(${dz})`;
+}
+function clearLocalPreview() { pImgEl.style.transform = ''; }
 box.addEventListener('mousedown', e => {
   if (eye) {
     // eyedropper: bg color from preview pixel
@@ -293,18 +304,26 @@ window.addEventListener('mousemove', e => {
   const r = box.getBoundingClientRect();
   tr.panX = Math.max(-5, Math.min(5, drag.px + (e.clientX-drag.x)/(r.width/2)));
   tr.panY = Math.max(-5, Math.min(5, drag.py + (e.clientY-drag.y)/(r.height/2)));
-  updInfo(); sendTransform();
+  updInfo(); sendTransform(); localPreview();
 });
-window.addEventListener('mouseup', () => { if (drag) { drag = null; sendTransform(true); } });
+window.addEventListener('mouseup', () => {
+  if (drag) {
+    drag = null;
+    sendTransform(true);
+    // lokale Verschiebung nach 250ms ausblenden — Server hat dann übernommen
+    setTimeout(clearLocalPreview, 250);
+  }
+});
 box.addEventListener('wheel', e => {
   e.preventDefault();
   tr.zoom = Math.max(0.1, Math.min(10, tr.zoom + (e.deltaY<0 ? tr.zoom*0.01 : -tr.zoom*0.01)));
-  updInfo(); sendTransform();
+  updInfo(); sendTransform(); localPreview();
+  setTimeout(clearLocalPreview, 250);
 }, {passive:false});
 
-function mirror() { tr.flipH = !tr.flipH; updInfo(); sendTransform(true); }
-function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); sendTransform(true); }
-function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); sendTransform(true); }
+function mirror() { tr.flipH = !tr.flipH; updInfo(); clearLocalPreview(); sendTransform(true); }
+function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); clearLocalPreview(); sendTransform(true); }
+function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); clearLocalPreview(); sendTransform(true); }
 
 // ── iPhone-Ausschnitt-Overlays (VIDEO 9:16 = 31.6% Band, FOTO 3:4 = 42.2% Band) ──
 let cropV = false, cropF = false;
@@ -467,6 +486,7 @@ async function poll() {
     $('sSent').textContent = s.mb_sent.toFixed(1) + ' MB';
     $('sUp').textContent = fmtUp(s.uptime);
     // Zustands-Echo: Regler an den echten Serverzustand angleichen
+    if (s.transform) serverTr = s.transform;   // Basis für lokale Drag-Vorschau
     if (s.transform && !drag && !tTimer) {
       tr = { zoom:s.transform.zoom, panX:s.transform.pan_x, panY:s.transform.pan_y,
              flipH:s.transform.flip_h, rotation:s.transform.rotation };
@@ -508,7 +528,7 @@ function refreshPreview() {
 }
 loadCams(); poll(); setInterval(poll, 500);
 pollDev(); setInterval(pollDev, 2000);
-setInterval(refreshPreview, 100);
+setInterval(refreshPreview, 50);
 setInterval(updPipe, 1000);
 setInterval(placeCrops, 2000);
 window.addEventListener('resize', placeCrops);
