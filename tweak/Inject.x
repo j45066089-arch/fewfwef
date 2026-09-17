@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "lordvcamstyle-2026-09-17-01"
+#define VCAM_BUILD_ID "portraitfix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -84,6 +84,9 @@ static _Atomic uint64_t g_photoSwaps = 0;
 // GUARD (Recording): 420v-Buffer (Video-Range) werden NICHT geswappt.
 // Zählt nur Treffer des neuen Early-Out in swapPixelsInPlace.
 static _Atomic uint64_t g_skip420v = 0;
+// GUARD (Preview): Porträt-Buffer (h>w) werden NICHT direkt geswappt —
+// sie sind Post-Rotations-Ableitungen des geswappten Sensor-Feeds.
+static _Atomic uint64_t g_skipPortrait = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -484,6 +487,19 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     size_t sw = CVPixelBufferGetWidth(src);
     size_t sh = CVPixelBufferGetHeight(src);
     OSType sfmt = CVPixelBufferGetPixelFormatType(src);
+
+    // PREVIEW-FIX (LordVCAM-Stil): Porträt-Buffer (h>w) nicht direkt swappen —
+    // sie sind Post-Rotations-Ableitungen (750x1334 Preview, 750x1000 Photo-
+    // Thumbnails) des geswappten Sensor-Feeds (1440x1080). Das Rotations-Node
+    // im Capture-Graph erzeugt sie korrekt aus unseren Pixeln; ein direkter
+    // Swap hier presst das 16:9-Quellbild in ein Hochformat-Sliver (kaputte
+    // Preview). LordVCAM rotiert hier ebenfalls nicht (needsCCW90=false für
+    // h>w) — der Graph übernimmt die Orientierung.
+    if (dh > dw) {
+        atomic_fetch_add(&g_skipPortrait, 1);
+        CVPixelBufferRelease(src);
+        return NO;
+    }
 
     // Einmalig das erste Mismatch-Format festhalten (Diagnose)
     if (!atomic_load(&g_fmtDumped) && (dw != sw || dh != sh || dfmt != sfmt)) {
@@ -1007,7 +1023,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1040,6 +1056,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_swapSkippedRecording),
             (int)atomic_load(&g_replacementEnabled),
             (unsigned long long)atomic_load(&g_skip420v),
+            (unsigned long long)atomic_load(&g_skipPortrait),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
