@@ -35,7 +35,7 @@
 #define STATUS_PORT 8769
 
 static os_log_t LOG = NULL;
-#define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.shosh.vcaminject", "inject"); \
+#define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.nikeboy.vcam", "inject"); \
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 // ---------------------------------------------------------------- Telemetrie (atomar)

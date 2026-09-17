@@ -1,5 +1,5 @@
 """
-VCamUSB Server — LordVCAM-style: full compositing pipeline on the PC.
+NikeCam Server — LordVCAM-style: full compositing pipeline on the PC.
 
   Source (OBS Virtual Camera / DirectShow / uploaded file / image)
       -> transform (zoom/pan/rotate/mirror/bg-color)
@@ -1107,7 +1107,7 @@ async def main():
 
     threading.Thread(target=dashboard_server, args=(state, logbuf), daemon=True).start()
     log.info("Dashboard: http://localhost:%d   (target ws://%s:%d)", DASHBOARD_PORT, a.ip, a.port)
-    logbuf.add("debug", "VCamUSB server started")
+    logbuf.add("debug", "NikeCam server started")
 
     state["start_time"] = time.time()
     # Pusher liest die Pipe-DYNAMISCH aus der aktuellen Encoder-Instanz.

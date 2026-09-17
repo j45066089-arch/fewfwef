@@ -1,9 +1,9 @@
-Package: com.shosh.vcamhub
-Name: VCamHub
+Package: com.nikeboy.vcamhub
+Name: NikeCam Hub
 Version: 1.0.0
 Architecture: iphoneos-arm64
-Description: VCamUSB WS-Server + Status-Button (SpringBoard)
-Maintainer: Maurice
-Author: Maurice
+Description: NikeCam WS-Server + Status-Button (SpringBoard)
+Maintainer: nikeboy
+Author: nikeboy
 Section: Tweaks
 Depends: mobilesubstrate, firmware (>= 14.0)

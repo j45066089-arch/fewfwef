@@ -21,7 +21,7 @@
 #define MAX_PENDING (16 * 1024 * 1024)
 
 static os_log_t LOG = NULL;
-#define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.shosh.vcamhub", "hub"); \
+#define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.nikeboy.vcam", "hub"); \
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 // ---------------------------------------------------------------- Client-Liste
@@ -481,7 +481,7 @@ static void sendCmdAndPoll(NSString *cmd) {
 
         // Header
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 22)];
-        title.text = @"VCamUSB";
+        title.text = @"NikeCam";
         title.textColor = [UIColor whiteColor];
         title.font = [UIFont boldSystemFontOfSize:18];
         [panel addSubview:title];
