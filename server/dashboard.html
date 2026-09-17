@@ -220,6 +220,8 @@
       <button class="btn btn-sm" id="bEye" onclick="toggleEyedropper()" title="Pick bg">◉</button>
       <button class="btn btn-sm" id="bCropV" onclick="toggleCrop('v')" title="iPhone-Video-Ausschnitt 9:16">📱V</button>
       <button class="btn btn-sm" id="bCropF" onclick="toggleCrop('f')" title="iPhone-Foto-Ausschnitt 3:4">📱F</button>
+      <button class="btn btn-sm" id="bPresetCam" onclick="presetCam()" title="Kamera-App-Modus (Rotation 270°)">📱KAMERA</button>
+      <button class="btn btn-sm" id="bPresetWeb" onclick="presetWeb()" title="Safari/WebRTC-Modus (Rotation 0°)">🌐SAFARI</button>
       <button class="btn btn-sm" onclick="resetTransform()">RESET</button>
     </div>
     <div class="preview" id="pBox">
@@ -312,6 +314,18 @@ box.addEventListener('wheel', e => {
 function mirror() { tr.flipH = !tr.flipH; updInfo(); sendTransform(true); }
 function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); sendTransform(true); }
 function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); sendTransform(true); }
+// Presets: Kamera-App braucht 270°-Server-Rotation (Tweak-Rotation ist aus!),
+// Safari/WebRTC braucht 0° — sonst Adaptions-Loop + FPS-Einbruch.
+function presetCam() {
+  tr.rotation = 270; updInfo(); sendTransform(true);
+  $('bPresetCam').style.borderColor = 'var(--gold)';
+  $('bPresetWeb').style.borderColor = '';
+}
+function presetWeb() {
+  tr.rotation = 0; updInfo(); sendTransform(true);
+  $('bPresetWeb').style.borderColor = 'var(--gold)';
+  $('bPresetCam').style.borderColor = '';
+}
 
 // ── iPhone-Ausschnitt-Overlays (VIDEO 9:16 = 31.6% Band, FOTO 3:4 = 42.2% Band) ──
 let cropV = false, cropF = false;
