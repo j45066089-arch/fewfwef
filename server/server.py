@@ -804,6 +804,19 @@ class DeviceBridge:
                 txt = self._read_status()
                 res = self._parse(txt)
                 res["connected"] = True
+                # Hub-Status (8768, SpringBoard) mitlesen
+                try:
+                    chan2 = self.client.get_transport().open_channel(
+                        "direct-tcpip", ("127.0.0.1", 8768), ("127.0.0.1", 0), timeout=3)
+                    time.sleep(0.5)
+                    hdata = b""
+                    while chan2.recv_ready():
+                        hdata += chan2.recv(4096)
+                    chan2.close()
+                    hm = re.search(r"clients=(\d+)", hdata.decode(errors="replace"))
+                    res["hub_clients"] = int(hm.group(1)) if hm else 0
+                except Exception:
+                    res["hub_clients"] = 0
                 try:
                     stdin, stdout, stderr = self.client.exec_command(
                         "launchctl list | grep mediaserverd", timeout=4)
@@ -883,6 +896,10 @@ class Dashboard:
                 "nal_sent": st.get("nal_sent", 0),
                 "uptime": int(time.time() - st["start_time"]) if st["start_time"] else 0,
                 "src_error": st.get("src_error"),
+                # Zustands-Echo: Browser-Regler synchronisieren sich damit
+                "transform": st.get("transform", {}),
+                "filters": st.get("filters", {}),
+                "playback": st.get("playback", {}),
             }
             return 200, "application/json", json.dumps(body)
         if u.path == "/api/cameras":

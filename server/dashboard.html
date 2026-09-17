@@ -78,6 +78,12 @@
   .preview:active { cursor:grabbing; }
   .preview img { position:absolute; width:100%; height:100%; object-fit:contain; pointer-events:none; }
   .preview .empty { color:var(--muted); font-size:11px; letter-spacing:1px; position:absolute; }
+  .cropov { position:absolute; border:1.5px dashed rgba(242,191,51,.85); background:rgba(242,191,51,.07);
+    z-index:5; pointer-events:none; display:none; align-items:flex-start; justify-content:center; }
+  .cropov span { font-size:9px; color:var(--gold); background:rgba(0,0,0,.55);
+    padding:2px 6px; border-radius:4px; margin-top:4px; letter-spacing:1px; }
+  .pipe-ok { color:var(--green); font-weight:700; }
+  .pipe-no { color:var(--red); font-weight:700; }
   .controls { display:flex; gap:6px; align-items:center; margin:0 12px 12px; flex-wrap:wrap; }
   .filter-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
   .filter-row label { min-width:70px; color:var(--muted); font-size:10px; text-transform:uppercase; }
@@ -108,6 +114,8 @@
         <span class="val hl" id="cSource">--</span>
         <span class="lbl">ENCODE</span>
         <span class="val" id="cEncode">--</span>
+        <span class="lbl">PIPELINE</span>
+        <span class="val" id="cPipe">--</span>
       </div>
     </div>
 
@@ -210,11 +218,15 @@
       <button class="btn btn-sm" onclick="rotate(-90)" title="Rotate L">↺</button>
       <button class="btn btn-sm" onclick="rotate(90)" title="Rotate R">↻</button>
       <button class="btn btn-sm" id="bEye" onclick="toggleEyedropper()" title="Pick bg">◉</button>
+      <button class="btn btn-sm" id="bCropV" onclick="toggleCrop('v')" title="iPhone-Video-Ausschnitt 9:16">📱V</button>
+      <button class="btn btn-sm" id="bCropF" onclick="toggleCrop('f')" title="iPhone-Foto-Ausschnitt 3:4">📱F</button>
       <button class="btn btn-sm" onclick="resetTransform()">RESET</button>
     </div>
     <div class="preview" id="pBox">
       <div class="empty" id="pEmpty">no source active</div>
       <img id="pImg" style="display:none">
+      <div class="cropov" id="cropVideo"><span>VIDEO 9:16</span></div>
+      <div class="cropov" id="cropPhoto"><span>FOTO 3:4</span></div>
     </div>
     <div class="controls">
       <button class="btn btn-sm" onclick="pb('play')">▶</button>
@@ -234,9 +246,24 @@ let eye = false, loop = true;
 
 function ctrl(type, extra) {
   fetch('/api/control', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(Object.assign({type}, extra||{})) }).catch(()=>{});
+    body: JSON.stringify(Object.assign({type}, extra||{})) })
+    .then(r => r.json())
+    .then(j => { if (j && j.error) showCmdErr('⚠ ' + j.error); })
+    .catch(() => showCmdErr('⚠ Server nicht erreichbar'));
 }
-function sendTransform() { ctrl('transform', { zoom:tr.zoom, panX:tr.panX, panY:tr.panY, flipH:tr.flipH, rotation:tr.rotation }); }
+let cmdErrTimer = null;
+function showCmdErr(t) {
+  const h = $('errHint'); h.style.display = ''; h.textContent = t;
+  clearTimeout(cmdErrTimer); cmdErrTimer = setTimeout(() => { h.style.display = 'none'; }, 4000);
+}
+// Transform gedrosselt senden (max ~60ms), letzter Wert geht garantiert raus
+let tTimer = null;
+function sendTransform(force) {
+  const payload = { zoom:tr.zoom, panX:tr.panX, panY:tr.panY, flipH:tr.flipH, rotation:tr.rotation };
+  if (force) { clearTimeout(tTimer); tTimer = null; ctrl('transform', payload); return; }
+  if (tTimer) return;
+  tTimer = setTimeout(() => { tTimer = null; ctrl('transform', payload); }, 60);
+}
 function updInfo() { $('pInfo').textContent = tr.zoom.toFixed(1)+'x | '+tr.panX.toFixed(2)+', '+tr.panY.toFixed(2)+(tr.rotation?' | '+tr.rotation+'°':'')+(tr.flipH?' | MIRROR':''); }
 
 // ── Drag = Pan, Wheel = Zoom ──
@@ -268,16 +295,45 @@ window.addEventListener('mousemove', e => {
   tr.panY = Math.max(-5, Math.min(5, drag.py + (e.clientY-drag.y)/(r.height/2)));
   updInfo(); sendTransform();
 });
-window.addEventListener('mouseup', () => drag=null);
+window.addEventListener('mouseup', () => { if (drag) { drag = null; sendTransform(true); } });
 box.addEventListener('wheel', e => {
   e.preventDefault();
   tr.zoom = Math.max(0.1, Math.min(10, tr.zoom + (e.deltaY<0 ? tr.zoom*0.01 : -tr.zoom*0.01)));
   updInfo(); sendTransform();
 }, {passive:false});
 
-function mirror() { tr.flipH = !tr.flipH; updInfo(); sendTransform(); }
-function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); sendTransform(); }
-function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); sendTransform(); }
+function mirror() { tr.flipH = !tr.flipH; updInfo(); sendTransform(true); }
+function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); sendTransform(true); }
+function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); sendTransform(true); }
+
+// ── iPhone-Ausschnitt-Overlays (VIDEO 9:16 = 31.6% Band, FOTO 3:4 = 42.2% Band) ──
+let cropV = false, cropF = false;
+function toggleCrop(k) {
+  if (k === 'v') cropV = !cropV; else cropF = !cropF;
+  $('bCropV').style.borderColor = cropV ? 'var(--gold)' : '';
+  $('bCropF').style.borderColor = cropF ? 'var(--gold)' : '';
+  placeCrops();
+}
+function placeCrops() {
+  const b = box.getBoundingClientRect();
+  if (!b.width || !b.height) return;
+  // Bild-Rechteck (object-fit:contain, Quelle 16:9)
+  const srcAR = 16 / 9;
+  const bAR = b.width / b.height;
+  let iw, ih;
+  if (bAR > srcAR) { ih = b.height; iw = ih * srcAR; } else { iw = b.width; ih = iw / srcAR; }
+  const ix = (b.width - iw) / 2, iy = (b.height - ih) / 2;
+  const vw = iw * 0.3156, fw = iw * 0.4219;
+  const setOv = (el, w, show) => {
+    el.style.display = show ? 'flex' : 'none';
+    el.style.left = (ix + (iw - w) / 2) + 'px';
+    el.style.top = iy + 'px';
+    el.style.width = w + 'px';
+    el.style.height = ih + 'px';
+  };
+  setOv($('cropVideo'), vw, cropV);
+  setOv($('cropPhoto'), fw, cropF);
+}
 function toggleEyedropper() {
   eye = !eye;
   box.style.cursor = eye ? 'crosshair' : 'grab';
@@ -353,6 +409,7 @@ async function pollDev() {
     if (!r.ok) return;
     const d = await r.json();
     if (d.connected) {
+      gDev = d;
       $('dBuild').textContent = d.build;
       $('dStage').textContent = d.stage;
       $('dFrame').textContent = (d.hasFrame ? 'OK ' : 'WAIT ') + d.rxNal + ' NAL';
@@ -371,6 +428,17 @@ async function pollDev() {
 }
 
 // ── Polling ──
+let gSrv = { connected:false }, gDev = { connected:false }, fSynced = false;
+function updPipe() {
+  const el = $('cPipe');
+  if (!el) return;
+  const parts = [];
+  parts.push(gSrv.connected ? '<span class="pipe-ok">SRV ✓</span>' : '<span class="pipe-no">SRV ✗</span>');
+  parts.push((gDev.hub_clients > 0) ? '<span class="pipe-ok">HUB ✓</span>' : '<span class="pipe-no">HUB ✗</span>');
+  parts.push(gDev.hasFrame ? '<span class="pipe-ok">DEC ✓</span>' : '<span class="pipe-no">DEC ✗</span>');
+  parts.push(gDev.inplace > 0 ? '<span class="pipe-ok">SWAP ✓</span>' : '<span class="pipe-no">SWAP ✗</span>');
+  el.innerHTML = parts.join(' ');
+}
 async function loadCams() {
   try {
     const r = await fetch('/api/cameras'); const cams = await r.json();
@@ -389,6 +457,7 @@ async function poll() {
     const r = await fetch('/api/stats');
     if (!r.ok) return;
     const s = await r.json();
+    gSrv = s;
     const d = $('tweakDot'), l = $('tweakLabel');
     if (s.connected) { d.className='pulse online'; l.textContent='CONNECTED'; l.style.color='var(--green)'; }
     else { d.className='pulse offline'; l.textContent='OFFLINE'; l.style.color='var(--red)'; }
@@ -397,6 +466,19 @@ async function poll() {
     $('sFps').textContent = s.fps;
     $('sSent').textContent = s.mb_sent.toFixed(1) + ' MB';
     $('sUp').textContent = fmtUp(s.uptime);
+    // Zustands-Echo: Regler an den echten Serverzustand angleichen
+    if (s.transform && !drag && !tTimer) {
+      tr = { zoom:s.transform.zoom, panX:s.transform.pan_x, panY:s.transform.pan_y,
+             flipH:s.transform.flip_h, rotation:s.transform.rotation };
+      updInfo();
+    }
+    if (s.filters && !fSynced) {
+      fSynced = true;
+      $('fB').value = Math.round((s.filters.brightness||0)*100); $('fBv').textContent = (s.filters.brightness||0).toFixed(2);
+      $('fC').value = Math.round((s.filters.contrast||1)*100);   $('fCv').textContent = (s.filters.contrast||1).toFixed(2);
+      $('fS').value = Math.round((s.filters.saturation||1)*100); $('fSv').textContent = (s.filters.saturation||1).toFixed(2);
+      $('fG').value = Math.round((s.filters.gamma||1)*100);      $('fGv').textContent = (s.filters.gamma||1).toFixed(2);
+    }
     if (s.running) {
       $('pImg').style.display = '';
       $('pEmpty').style.display = 'none';
@@ -418,6 +500,9 @@ function fmtUp(s) {
 }
 loadCams(); poll(); setInterval(poll, 500);
 pollDev(); setInterval(pollDev, 2000);
+setInterval(updPipe, 1000);
+setInterval(placeCrops, 2000);
+window.addEventListener('resize', placeCrops);
 </script>
 </body>
 </html>
