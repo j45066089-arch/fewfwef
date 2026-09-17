@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-probe-3"
+#define VCAM_BUILD_ID "ios18-probe-4"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -30,6 +30,9 @@
 #import <time.h>
 #import <os/log.h>
 #import <pthread.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <stdarg.h>
 
 #define WS_PORT 8767
 #define STATUS_PORT 8769
@@ -37,6 +40,20 @@
 static os_log_t LOG = NULL;
 #define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.nikeboy.vcam", "inject"); \
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
+
+// Datei-Log: os_log wird in Daemons gefiltert -> fuer Diagnose direkt in Datei.
+// Pfad: /var/mobile/Library/Logs/vcaminject.log (mobile-writable) + /tmp/vcaminject.log
+static void FLOG(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    const char *paths[] = { "/var/mobile/Library/Logs/vcaminject.log", "/tmp/vcaminject.log", NULL };
+    for (int i = 0; paths[i]; i++) {
+        int fd = open(paths[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) { write(fd, buf, strlen(buf)); close(fd); break; }
+    }
+}
 
 // ---------------------------------------------------------------- Telemetrie (atomar)
 static _Atomic uint64_t g_wsBinaryCount = 0;
@@ -1293,9 +1310,13 @@ static void statusServerThread(void) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(STATUS_PORT);
-    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(srv); return; }
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        FLOG("statusServer: bind FAIL errno=%d (%s)\n", errno, strerror(errno));
+        close(srv); return;
+    }
     if (listen(srv, 4) < 0) { close(srv); return; }
     L("Status-Server auf 127.0.0.1:%d", STATUS_PORT);
+    FLOG("statusServer: bind OK auf 127.0.0.1:%d\n", STATUS_PORT);
     while (1) {
         int c = accept(srv, NULL, NULL);
         if (c < 0) continue;
@@ -2089,6 +2110,7 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
+    FLOG("ctor: proc=%s pid=%d build=%s\n", [proc UTF8String] ?: "?", getpid(), VCAM_BUILD_ID);
     // iOS 16: mediaserverd ist der Capture-Server.
     // iOS 18: cameracaptured ist der Nachfolger (BW-Klassen + VideoToolbox-Decoder,
     //   verifiziert über UFATM obsvcameraclone: isEqualToString@"cameracaptured").
@@ -2101,12 +2123,17 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
             @"mediaserverd", @"cameracaptured", @"corecaptured", @"applecamerad", @"avconferenced"
         ]];
     }
-    if (![captureProcs containsObject:proc]) return;
+    if (![captureProcs containsObject:proc]) {
+        FLOG("ctor: proc=%s NICHT in captureProcs -> return\n", [proc UTF8String] ?: "?");
+        return;
+    }
     snprintf(g_procName, sizeof(g_procName), "%s", [proc UTF8String] ?: "?");
     L("Capture-Daemon erkannt: %@ (aktiv=%d)", proc, (int)isActive);
+    FLOG("ctor: proc=%s aktiv=%d\n", [proc UTF8String] ?: "?", (int)isActive);
     if (!isActive) {
         // Nicht-aktiver Daemon: nur beobachten, KEIN Status-Server/WS-Client,
         // damit nicht der falsche Prozess Port 8769 gewinnt.
+        FLOG("ctor: proc=%s inaktiv -> return (kein Server)\n", [proc UTF8String] ?: "?");
         return;
     }
 
