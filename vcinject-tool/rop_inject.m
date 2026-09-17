@@ -457,11 +457,21 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			// die Dylib schon geladen war und dyld ihn nicht erneut laeuft), rufen wir den
 			// exportierten Einstiegspunkt explizit auf (idempotent -> safe bei Doppelaufruf).
 			// remoteDlSym vergleicht gegen LC_SYMTAB mit Mach-O-Unterstrich.
-			vm_address_t injectedImageBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-			vm_address_t startFunc = injectedImageBase
-				? remoteDlSym(task, injectedImageBase, "_VCamInject_start") : 0;
-			printf("[injectDylibViaRop] imageBase=0x%llX _VCamInject_start=0x%llX\n",
-			       (unsigned long long)injectedImageBase, (unsigned long long)startFunc);
+			// dlsym(handle, "_VCamInject_start") via ROP — löst über den dlopen-Handle
+			// korrekt auf (getRemoteImageAddress scheitert an roothide-Pfad-Redirect).
+			vm_address_t libDyldAddr2 = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+			uint64_t dlsymAddr = remoteDlSym(task, libDyldAddr2, "_dlsym");
+			size_t remoteSymNameSize = 0;
+			vm_address_t remoteSymName = writeStringToTask(task, "_VCamInject_start", &remoteSymNameSize);
+			vm_address_t startFunc = 0;
+			if (remoteSymName && dlsymAddr) {
+				uint64_t dlsymRet = 0;
+				kern_return_t dlsymKr = arbCall(task, pthread, (uint64_t*)&dlsymRet, true, dlsymAddr, 2, dlopenRet, remoteSymName);
+				vm_deallocate(task, remoteSymName, remoteSymNameSize);
+				if (dlsymKr == KERN_SUCCESS && dlsymRet) startFunc = (vm_address_t)dlsymRet;
+			}
+			printf("[injectDylibViaRop] _VCamInject_start=0x%llX (via dlsym)\n",
+			       (unsigned long long)startFunc);
 			if (startFunc) {
 				uint64_t startRet = 0;
 				kern_return_t startKr = arbCall(task, pthread, (uint64_t*)&startRet, true, startFunc, 0);
