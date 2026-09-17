@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "rotmode-2026-09-17-01"
+#define VCAM_BUILD_ID "fillfix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -91,6 +91,10 @@ static _Atomic uint64_t g_skipPortrait = 0;
 // 2=90°CCW, 3=180° — Letterbox-Rotation für alle Landscape-Ziele.
 static _Atomic int64_t g_rotMode = 1;
 static _Atomic uint64_t g_rotApplied = 0;
+// ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
+static _Atomic int64_t g_lastSurfID = 0;
+static _Atomic int64_t g_lastPts = 0;
+static _Atomic uint64_t g_dupSkip = 0;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -467,14 +471,14 @@ static void rotateScaleUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW,
     free(tmp);
 }
 
-// ---------------------------------------------------------------- Letterbox-Rotation (rot=N)
-// Rotiert src (90°/180°) und skaliert SEITENVERHÄLTNISTREU in dst hinein;
-// der Rest wird mit fillV (Schwarz je Range) gefüllt. Kein Verzerren —
-// das war der Fehler der alten Rotate+Stretch-Kombination.
+// ---------------------------------------------------------------- Fill-Rotation (rot=N)
+// Rotiert src (90°/180°) und skaliert BILDFÜLLEND (Crop, kein Letterbox)
+// in dst — das Ziel ist IMMER das volle iPhone-Format (9:16 Video / 3:4 Foto),
+// der OBS-Inhalt füllt es komplett, Überhang wird mittig abgeschnitten.
 // 90°: rotW=srcH, rotH=srcW. 180°: rotW=srcW, rotH=srcH.
 static void rotateFitPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
-                           uint8_t rotConst, ConvFn conv, uint8_t fillV) {
+                           uint8_t rotConst, ConvFn conv) {
     if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
     size_t rotW = (rotConst == 2) ? srcW : srcH;
     size_t rotH = (rotConst == 2) ? srcH : srcW;
@@ -485,28 +489,28 @@ static void rotateFitPlane(const uint8_t *sp, size_t srcStride, size_t srcW, siz
     vImage_Buffer tmpBuf = { tmp, rotH, rotW, rotW };
     vImage_Error err = vImageRotate90_Planar8(&srcBuf, &tmpBuf, rotConst, 0, kvImageNoFlags);
     if (err != kvImageNoError) { free(tmp); return; }
-    // Aspect-Fit: rotiertes Bild vollständig, mittig, schwarz außen.
-    size_t fitW, fitH;
-    if (rotW * dstH <= dstW * rotH) { fitH = dstH; fitW = rotW * dstH / rotH; }
-    else { fitW = dstW; fitH = rotH * dstW / rotW; }
-    fitW &= ~(size_t)1; fitH &= ~(size_t)1;
-    if (fitW < 2 || fitH < 2) { free(tmp); return; }
-    size_t offX = (dstW - fitW) / 2;
-    size_t offY = (dstH - fitH) / 2;
-    for (size_t y = 0; y < dstH; y++) memset(dp + y * dstStride, fillV, dstW);
-    vImage_Buffer dstSub = { dp + offY * dstStride + offX, fitH, fitW, dstStride };
-    err = vImageScale_Planar8(&tmpBuf, &dstSub, NULL, kvImageNoFlags);
+    // Aspect-FILL: Ausschnitt des rotierten Bildes wählen, der dst-Format hat,
+    // dann auf dst (voll) skalieren — keine Ränder, volle Fläche.
+    size_t cropW, cropH;
+    if (rotW * dstH >= dstW * rotH) { cropH = rotH; cropW = rotH * dstW / dstH; }
+    else { cropW = rotW; cropH = rotW * dstH / dstW; }
+    cropW &= ~(size_t)1; cropH &= ~(size_t)1;
+    if (cropW < 2 || cropH < 2) { free(tmp); return; }
+    size_t cropX = (rotW - cropW) / 2;
+    size_t cropY = (rotH - cropH) / 2;
+    vImage_Buffer tmpSub = { tmp + cropY * rotW + cropX, cropH, cropW, rotW };
+    vImage_Buffer dstBuf = { dp, dstH, dstW, dstStride };
+    err = vImageScale_Planar8(&tmpSub, &dstBuf, NULL, kvImageNoFlags);
     if (err == kvImageNoError && conv) {
         static uint8_t lutY[256]; static BOOL lutYInit = NO;
         if (!lutYInit) { for (int i = 0; i < 256; i++) lutY[i] = conv((uint8_t)i); lutYInit = YES; }
-        vImageTableLookUp_Planar8(&dstSub, &dstSub, lutY, kvImageNoFlags);
+        vImageTableLookUp_Planar8(&dstBuf, &dstBuf, lutY, kvImageNoFlags);
     }
     free(tmp);
 }
 
-// UV-Plane: 16-bit-interleaved CbCr — Hintergrund neutral 0x8080, Rotation
-// als Planar16U (CbCr-Paare bleiben zusammen), danach Integer-Scale in die
-// Fit-Region (wie rotateScaleUVPlane).
+// UV-Plane: 16-bit-interleaved CbCr — Rotation als Planar16U (CbCr-Paare
+// bleiben zusammen), danach Integer-Scale des FILL-Ausschnitts auf dst.
 static void rotateFitUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                              uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
                              uint8_t rotConst, ConvFn conv) {
@@ -522,23 +526,19 @@ static void rotateFitUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     vImage_Buffer tmpBuf = { tmp, rotH, rotW, tmpRow };
     vImage_Error err = vImageRotate90_Planar16U(&srcBuf, &tmpBuf, rotConst, 0x8080, kvImageNoFlags);
     if (err != kvImageNoError) { free(tmp); return; }
-    size_t fitW, fitH;
-    if (rotW * dstH <= dstW * rotH) { fitH = dstH; fitW = rotW * dstH / rotH; }
-    else { fitW = dstW; fitH = rotH * dstW / rotW; }
-    fitW &= ~(size_t)1; fitH &= ~(size_t)1;
-    if (fitW < 2 || fitH < 2) { free(tmp); return; }
-    size_t offX = (dstW - fitW) / 2;
-    size_t offY = (dstH - fitH) / 2;
+    size_t cropW, cropH;
+    if (rotW * dstH >= dstW * rotH) { cropH = rotH; cropW = rotH * dstW / dstH; }
+    else { cropW = rotW; cropH = rotW * dstH / dstW; }
+    cropW &= ~(size_t)1; cropH &= ~(size_t)1;
+    if (cropW < 2 || cropH < 2) { free(tmp); return; }
+    size_t cropX = (rotW - cropW) / 2;
+    size_t cropY = (rotH - cropH) / 2;
     for (size_t y = 0; y < dstH; y++) {
-        uint8_t *row = dp + y * dstStride;
-        for (size_t x = 0; x < dstW; x++) { row[x * 2] = 0x80; row[x * 2 + 1] = 0x80; }
-    }
-    for (size_t y = 0; y < fitH; y++) {
-        size_t ry = y * rotH / fitH;
-        uint8_t *dstRow = dp + (offY + y) * dstStride + offX * 2;
+        size_t ry = cropY + y * cropH / dstH;
+        uint8_t *dstRow = dp + y * dstStride;
         const uint8_t *srcRow = tmp + ry * tmpRow;
-        for (size_t x = 0; x < fitW; x++) {
-            size_t rx = x * rotW / fitW;
+        for (size_t x = 0; x < dstW; x++) {
+            size_t rx = cropX + x * cropW / dstW;
             uint8_t cb = srcRow[rx * 2];
             uint8_t cr = srcRow[rx * 2 + 1];
             dstRow[x * 2]     = conv ? conv(cb) : cb;
@@ -552,6 +552,22 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
     if (!dst) return NO;
+
+    // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface
+    // (gleicher pts) und rufen den Swap nebenläufig auf — wiederholtes
+    // Überschreiben derselben Surface erzeugt Races/Flackern im Video.
+    // Nur EIN Swap pro Surface+pts; spätere Emissions desselben Frames
+    // laufen unverändert durch (die Surface ist bereits getauscht).
+    IOSurfaceRef dupSurf = CVPixelBufferGetIOSurface(dst);
+    int64_t dupSid = dupSurf ? (int64_t)IOSurfaceGetID(dupSurf) : 0;
+    CMTime dupT = CMSampleBufferGetPresentationTimeStamp(original);
+    if (dupSid != 0 && atomic_load(&g_lastSurfID) == dupSid &&
+        atomic_load(&g_lastPts) == dupT.value) {
+        atomic_fetch_add(&g_dupSkip, 1);
+        return NO;
+    }
+    atomic_store(&g_lastSurfID, dupSid);
+    atomic_store(&g_lastPts, (int64_t)dupT.value);
 
     // RECORDING-FIX: 420v-Buffer NICHT mehr blind überspringen. Der
     // Movie-Sink (BWQuickTimeMovieFileSinkNode) erbt sein renderSampleBuffer:
@@ -760,12 +776,11 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             else if (rm == 3) rotConst = 2;  // kRotate180DegreesClockwise
 
             if (rotConst) {
-                uint8_t fillY = dstIsVideoRange ? 0x10 : 0x00;
                 rotateFitPlane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
                                CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
                                CVPixelBufferGetBaseAddressOfPlane(dst, 0),
                                CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
-                               rotConst, convY, fillY);
+                               rotConst, convY);
                 rotateFitUVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
                                  CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
                                  CVPixelBufferGetBaseAddressOfPlane(dst, 1),
@@ -1137,7 +1152,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotApp=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotApp=%llu dup=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1173,6 +1188,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_skipPortrait),
             (long long)atomic_load(&g_rotMode),
             (unsigned long long)atomic_load(&g_rotApplied),
+            (unsigned long long)atomic_load(&g_dupSkip),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
