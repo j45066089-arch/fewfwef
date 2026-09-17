@@ -1391,7 +1391,7 @@ static void dumpCopyNextClasses(void) {
 }
 
 // ---------------------------------------------------------------- LordVCAM-Selector-Besitzer finden
-static void dumpSelectorOwners(void) {
+static void __attribute__((unused)) dumpSelectorOwners(void) {
     const char *sels[] = {
         "emitSampleBuffer:",
         "sendMediaServerdSampleAtPoint:",
