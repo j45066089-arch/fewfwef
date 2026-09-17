@@ -144,6 +144,55 @@
     </div>
 
     <div class="card">
+      <div class="card-title">Device (iPhone)</div>
+      <div class="grid">
+        <span class="lbl">BUILD</span>
+        <span class="val" id="dBuild">--</span>
+        <span class="lbl">STAGE</span>
+        <span class="val hl" id="dStage">--</span>
+        <span class="lbl">FRAME</span>
+        <span class="val" id="dFrame">--</span>
+        <span class="lbl">SWAPS</span>
+        <span class="val" id="dSwaps">--</span>
+        <span class="lbl">MEDIA</span>
+        <span class="val ok" id="dMedia">--</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Stage</label>
+        <button class="btn btn-sm dbtn" data-mode="stage" data-val="0" onclick="devCmd('stage=0')">off</button>
+        <button class="btn btn-sm dbtn" data-mode="stage" data-val="2" onclick="devCmd('stage=2')">dec</button>
+        <button class="btn btn-sm dbtn" data-mode="stage" data-val="3" onclick="devCmd('stage=3')">full</button>
+      </div>
+      <div class="row">
+        <label>Foto rot</label>
+        <button class="btn btn-sm dbtn" data-mode="rot" data-val="0" onclick="devCmd('rot=0')">off</button>
+        <button class="btn btn-sm dbtn" data-mode="rot" data-val="1" onclick="devCmd('rot=1')">CW</button>
+        <button class="btn btn-sm dbtn" data-mode="rot" data-val="2" onclick="devCmd('rot=2')">CCW</button>
+        <button class="btn btn-sm dbtn" data-mode="rot" data-val="3" onclick="devCmd('rot=3')">180</button>
+      </div>
+      <div class="row">
+        <label>Video rot</label>
+        <button class="btn btn-sm dbtn" data-mode="rotv" data-val="0" onclick="devCmd('rotv=0')">off</button>
+        <button class="btn btn-sm dbtn" data-mode="rotv" data-val="1" onclick="devCmd('rotv=1')">CW</button>
+        <button class="btn btn-sm dbtn" data-mode="rotv" data-val="2" onclick="devCmd('rotv=2')">CCW</button>
+        <button class="btn btn-sm dbtn" data-mode="rotv" data-val="3" onclick="devCmd('rotv=3')">180</button>
+      </div>
+      <div class="row">
+        <label>Encoder</label>
+        <button class="btn btn-sm dbtn" data-mode="rote" data-val="0" onclick="devCmd('rote=0')">off</button>
+        <button class="btn btn-sm dbtn" data-mode="rote" data-val="1" onclick="devCmd('rote=1')">CW</button>
+        <button class="btn btn-sm dbtn" data-mode="rote" data-val="2" onclick="devCmd('rote=2')">CCW</button>
+        <button class="btn btn-sm dbtn" data-mode="rote" data-val="3" onclick="devCmd('rote=3')">180</button>
+      </div>
+      <div class="row">
+        <label>Range</label>
+        <button class="btn btn-sm dbtn" data-mode="rng" data-val="0" onclick="devCmd('rng=0')">off</button>
+        <button class="btn btn-sm dbtn" data-mode="rng" data-val="1" onclick="devCmd('rng=1')">on</button>
+      </div>
+      <div class="hint" id="devErr" style="display:none"></div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Filters</div>
       <div class="filter-row"><label>Brightness</label><input type="range" id="fB" min="-100" max="100" value="0"><span id="fBv">0.00</span></div>
       <div class="filter-row"><label>Contrast</label><input type="range" id="fC" min="25" max="400" value="100"><span id="fCv">1.00</span></div>
@@ -291,6 +340,36 @@ function toggleLoop() {
   ctrl('playback', {action:'loop', enabled:loop});
 }
 
+// ── Device (iPhone) ──
+function devCmd(cmd) {
+  fetch('/api/device_cmd', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({cmd}) }).then(r=>r.json()).then(d => {
+      if (d && d.connected) pollDev();
+    }).catch(()=>{});
+}
+async function pollDev() {
+  try {
+    const r = await fetch('/api/device');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.connected) {
+      $('dBuild').textContent = d.build;
+      $('dStage').textContent = d.stage;
+      $('dFrame').textContent = (d.hasFrame ? 'OK ' : 'WAIT ') + d.rxNal + ' NAL';
+      $('dSwaps').textContent = d.inplace + ' / dup ' + d.dup;
+      $('dMedia').textContent = d.mediaserverd || '?';
+      document.querySelectorAll('.dbtn').forEach(b => {
+        const cur = String(d[b.dataset.mode]);
+        b.style.background = (b.dataset.val === cur) ? 'rgba(51,204,102,.25)' : '';
+      });
+      $('devErr').style.display = 'none';
+    } else {
+      $('devErr').style.display = '';
+      $('devErr').textContent = '⚠ ' + (d.error || 'SSH nicht erreichbar');
+    }
+  } catch(e) {}
+}
+
 // ── Polling ──
 async function loadCams() {
   try {
@@ -338,6 +417,7 @@ function fmtUp(s) {
   return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
 }
 loadCams(); poll(); setInterval(poll, 500);
+pollDev(); setInterval(pollDev, 2000);
 </script>
 </body>
 </html>

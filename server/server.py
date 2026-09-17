@@ -742,10 +742,124 @@ def parse_multipart(body, content_type):
     return out
 
 
+# ---------------------------------------------------------------- Geräte-Bridge (SSH → iPhone-Status-Port)
+SSH_HOST = "127.0.0.1"
+SSH_PORT = 2222
+SSH_USER = "root"
+SSH_PW = "7789"
+STATUS_PORT = 8769
+
+
+class DeviceBridge:
+    """Liest/steuert VCamInject auf dem iPhone über SSH direct-tcpip (Loopback-Port 8769)."""
+
+    def __init__(self):
+        self.client = None
+        self.cache = {"connected": False, "error": ""}
+        self.cache_ts = 0.0
+        self.last_err = ""
+
+    def _connect(self):
+        import paramiko
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        c.connect(SSH_HOST, port=SSH_PORT, username=SSH_USER, password=SSH_PW,
+                  timeout=4, banner_timeout=4, auth_timeout=4)
+        return c
+
+    def _ensure(self):
+        if self.client is not None:
+            try:
+                t = self.client.get_transport()
+                if t and t.is_active():
+                    return True
+            except Exception:
+                pass
+            self.client = None
+        try:
+            self.client = self._connect()
+            return True
+        except Exception as e:
+            self.last_err = str(e)[:120]
+            self.client = None
+            return False
+
+    def _read_status(self):
+        chan = self.client.get_transport().open_channel(
+            "direct-tcpip", ("127.0.0.1", STATUS_PORT), ("127.0.0.1", 0), timeout=5)
+        time.sleep(0.9)
+        data = b""
+        while chan.recv_ready():
+            data += chan.recv(65536)
+        chan.close()
+        return data.decode(errors="replace")
+
+    def get_status(self, force=False):
+        now = time.time()
+        if not force and now - self.cache_ts < 2.0:
+            return self.cache
+        res = {"connected": False, "error": ""}
+        if self._ensure():
+            try:
+                txt = self._read_status()
+                res = self._parse(txt)
+                res["connected"] = True
+                try:
+                    stdin, stdout, stderr = self.client.exec_command(
+                        "launchctl list | grep mediaserverd", timeout=4)
+                    ms = stdout.read().decode(errors="replace").strip()
+                    parts = ms.split()
+                    if parts:
+                        res["mediaserverd"] = f"pid={parts[0]} exit={parts[1]}"
+                except Exception:
+                    res["mediaserverd"] = "?"
+            except Exception as e:
+                res["error"] = str(e)[:120]
+                self.client = None
+        else:
+            res["error"] = self.last_err or "SSH nicht erreichbar"
+        self.cache = res
+        self.cache_ts = now
+        return res
+
+    def send_cmd(self, cmd):
+        if not self._ensure():
+            return {"connected": False, "error": self.last_err or "SSH down"}
+        try:
+            chan = self.client.get_transport().open_channel(
+                "direct-tcpip", ("127.0.0.1", STATUS_PORT), ("127.0.0.1", 0), timeout=5)
+            chan.sendall(cmd.encode())
+            time.sleep(0.8)
+            data = b""
+            while chan.recv_ready():
+                data += chan.recv(65536)
+            chan.close()
+            res = self._parse(data.decode(errors="replace"))
+            res["connected"] = True
+            self.cache = res
+            self.cache_ts = time.time()
+            return res
+        except Exception as e:
+            self.client = None
+            return {"connected": False, "error": str(e)[:120]}
+
+    @staticmethod
+    def _parse(txt):
+        out = {}
+        for k in ("stage", "rxNal", "emit", "inplace", "rotApp", "dup",
+                  "errors", "hasFrame", "skipPort", "rot", "rotv", "rote", "rng"):
+            m = re.search(re.escape(k) + r"=(-?\d+)", txt)
+            out[k] = int(m.group(1)) if m else 0
+        m = re.search(r"build=(\S+)", txt)
+        out["build"] = m.group(1) if m else "?"
+        return out
+
+
 class Dashboard:
     def __init__(self, state, logbuf):
         self.state = state
         self.logbuf = logbuf
+        self.device = DeviceBridge()
         self.html = open(DASH_PATH, encoding="utf-8").read()
 
     def handle_get(self, u):
@@ -777,6 +891,8 @@ class Dashboard:
             return 200, "application/json", json.dumps(self.logbuf.get())
         if u.path == "/api/network":
             return 200, "application/json", json.dumps({"interfaces": local_ips()})
+        if u.path == "/api/device":
+            return 200, "application/json", json.dumps(self.device.get_status())
         if u.path == "/preview.jpg":
             jpg = self.state["pipeline"].preview()
             if jpg:
@@ -785,6 +901,15 @@ class Dashboard:
         return 404, "text/plain", "not found"
 
     def handle_post(self, u, body, ctype):
+        if u.path == "/api/device_cmd":
+            try:
+                msg = json.loads(body.decode("utf-8"))
+            except Exception:
+                return 400, "application/json", json.dumps({"error": "bad json"})
+            cmd = str(msg.get("cmd", ""))[:32]
+            if not re.match(r"^(stage|rot|rotv|rote|rng)=[0-3]$", cmd):
+                return 400, "application/json", json.dumps({"error": "cmd"})
+            return 200, "application/json", json.dumps(self.device.send_cmd(cmd))
         if u.path == "/api/upload":
             fields = parse_multipart(body, ctype)
             up = fields.get("file")
