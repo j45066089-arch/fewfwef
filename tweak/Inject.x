@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "sizefix-2026-09-17-01"
+#define VCAM_BUILD_ID "samesizefix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -92,10 +92,10 @@ static _Atomic uint64_t g_skipPortrait = 0;
 static _Atomic int64_t g_rotMode = 1;
 // VIDEO-PFAD (420v) nach Größenklasse getrennt:
 //   g_rotVidMode: 420v AUßER 1920x1080 (Live-Preview-Feed 2304x1296) — CW.
-//   g_rotEncMode: 420v 1920x1080 (Encoder-Feed) — 180°. Die Encode-Kette
-//   rotiert nochmal CW (Pipeline) + CW (Movie-Matrix) = effektiv 180°.
+//   g_rotEncMode: 420v 1920x1080 (Encoder-Feed) — CCW. Die App dreht diesen
+//   Feed beim Speichern nochmal CW90 (Matrix) — CCW-Inhalt wird dadurch aufrecht.
 static _Atomic int64_t g_rotVidMode = 1;
-static _Atomic int64_t g_rotEncMode = 3;
+static _Atomic int64_t g_rotEncMode = 2;
 static _Atomic uint64_t g_rotApplied = 0;
 // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
 static _Atomic int64_t g_lastSurfID = 0;
@@ -710,30 +710,65 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             if (srcFullRange && dstVideoRange) { convY = fullToVideoY; convC = fullToVideoC; }
             else if (srcVideoRange && dstFullRange) { convY = videoToFullY; convC = videoToFullC; }
 
-            if (convY) atomic_fetch_add(&g_skip420v, 1);   // 420v-Treffer weiter zählen (Diagnose)
-
-            for (size_t p = 0; p < 2; p++) {
-                const uint8_t *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
-                uint8_t *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
-                if (!sp || !dp) continue;
-                size_t sb = CVPixelBufferGetBytesPerRowOfPlane(src, p);
-                size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
-                size_t ph = CVPixelBufferGetHeightOfPlane(dst, p);
-                size_t copy = db < sb ? db : sb;
-                ConvFn conv = (p == 0) ? convY : convC;
-                if (conv) {
-                    for (size_t y = 0; y < ph; y++) {
-                        const uint8_t *srow = sp + y * sb;
-                        uint8_t *drow = dp + y * db;
-                        for (size_t x = 0; x < copy; x++) drow[x] = conv(srow[x]);
-                    }
+            // ENCODER-FEED-FIX: Der 1920x1080-420v-Feed (Movie-Encoder) trifft
+            // HIER (gleiche Größe wie die Decoder-Quelle) — vorher wurde er
+            // ohne Rotation 1:1 kopiert, und die App-Matrix (CW90) drehte das
+            // Vollbild in der Galerie. Jetzt gilt dieselbe rot/rotv/rote-Logik
+            // wie im Mismatch-Pfad, inkl. Fill-Rotation.
+            int rmSame = (int)atomic_load(&g_rotMode);
+            if (dstVideoRange) {
+                if (dw == 1920 && dh == 1080) {
+                    int re = (int)atomic_load(&g_rotEncMode);
+                    if (re != 0) rmSame = re;
                 } else {
-                    for (size_t y = 0; y < ph; y++) {
-                        memcpy(dp + y * db, sp + y * sb, copy);
-                    }
+                    int rv = (int)atomic_load(&g_rotVidMode);
+                    if (rv != 0) rmSame = rv;
                 }
             }
-            ok = YES;
+            uint8_t rotSame = 0;
+            if (rmSame == 1) rotSame = 1;       // CW
+            else if (rmSame == 2) rotSame = 3;  // CCW
+            else if (rmSame == 3) rotSame = 2;  // 180
+
+            if (rotSame && dstVideoRange) {
+                rotateFitPlane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
+                               CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
+                               CVPixelBufferGetBaseAddressOfPlane(dst, 0),
+                               CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
+                               rotSame, convY);
+                rotateFitUVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+                                 CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
+                                 CVPixelBufferGetBaseAddressOfPlane(dst, 1),
+                                 CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
+                                 rotSame, convC);
+                ok = YES;
+                atomic_fetch_add(&g_rotApplied, 1);
+            } else {
+                if (convY) atomic_fetch_add(&g_skip420v, 1);   // 420v-Treffer weiter zählen (Diagnose)
+
+                for (size_t p = 0; p < 2; p++) {
+                    const uint8_t *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
+                    uint8_t *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
+                    if (!sp || !dp) continue;
+                    size_t sb = CVPixelBufferGetBytesPerRowOfPlane(src, p);
+                    size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
+                    size_t ph = CVPixelBufferGetHeightOfPlane(dst, p);
+                    size_t copy = db < sb ? db : sb;
+                    ConvFn conv = (p == 0) ? convY : convC;
+                    if (conv) {
+                        for (size_t y = 0; y < ph; y++) {
+                            const uint8_t *srow = sp + y * sb;
+                            uint8_t *drow = dp + y * db;
+                            for (size_t x = 0; x < copy; x++) drow[x] = conv(srow[x]);
+                        }
+                    } else {
+                        for (size_t y = 0; y < ph; y++) {
+                            memcpy(dp + y * db, sp + y * sb, copy);
+                        }
+                    }
+                }
+                ok = YES;
+            }
         } else {
             // Größen-Mismatch. Entscheidung anhand des Orientierungs-Attachments:
             // trägt der Ziel-Buffer "RotationDegrees" != 0, müssen wir rotieren.
