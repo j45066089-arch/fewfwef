@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-probe-4"
+#define VCAM_BUILD_ID "ios18-probe-5"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -48,7 +48,7 @@ static void FLOG(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    const char *paths[] = { "/var/mobile/Library/Logs/vcaminject.log", "/tmp/vcaminject.log", NULL };
+    const char *paths[] = { "/var/mobile/Documents/vcaminject.log", "/var/tmp/vcaminject.log", "/tmp/vcaminject.log", NULL };
     for (int i = 0; paths[i]; i++) {
         int fd = open(paths[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd >= 0) { write(fd, buf, strlen(buf)); close(fd); break; }
