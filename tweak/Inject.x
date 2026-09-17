@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "diagfix-2026-09-17-01"
+#define VCAM_BUILD_ID "metafix-2026-09-17-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -72,6 +72,12 @@ static _Atomic int g_modeBW = 1;
 static _Atomic int g_replacementEnabled = 1;
 static _Atomic int g_useCountDelay = 1;   // "urel=N": 1=66ms-Verzögerung, 0=sofort
 static _Atomic int g_diag = 1;            // "diag=N": 0 = Tracking/Logging pro Frame aus
+// VIDEO-DRIVEN METADATA (Schritt 1: Frame-Metadaten-Konsistenz für KYC-Checks)
+static _Atomic int g_metaOn = 1;          // "mdon=N": MetadataDictionary-Umschreiben
+static _Atomic int64_t g_videoLuma = 0;   // mittlere Luminanz des OBS-Frames (0-255)
+static _Atomic int64_t g_videoLux = 0;    // daraus abgeleitetes LuxLevel
+static float g_metaExposure = 0.008333f;  // "expt=" Belichtungszeit (Sekunden)
+static float g_metaSnr = 24.0f;           // "snr=" Rauschmaß (dB-artig)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
 static _Atomic uint64_t g_swapSkippedPhoto = 0;
@@ -204,6 +210,30 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
     g_latestFrame = CVPixelBufferRetain(imageBuffer);
     [g_frameLock unlock];
     atomic_store(&g_hasLatestFrame, 1);
+
+    // VIDEO-DRIVEN METADATA: mittlere Luminanz des dekodierten Frames messen
+    // (Sample alle 8 Pixel der Y-Plane) → LuxLevel für die Frame-Metadaten.
+    if (atomic_load(&g_metaOn)) {
+        CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+        uint8_t *y = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 0);
+        size_t stride = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 0);
+        size_t w = CVPixelBufferGetWidth(imageBuffer);
+        size_t h = CVPixelBufferGetHeight(imageBuffer);
+        if (y) {
+            uint64_t sum = 0, cnt = 0;
+            for (size_t yy = 0; yy < h; yy += 8) {
+                for (size_t xx = 0; xx < w; xx += 8) {
+                    sum += y[yy * stride + xx];
+                    cnt++;
+                }
+            }
+            uint32_t avg = cnt ? (uint32_t)(sum / cnt) : 0;
+            // Luminanz 0-255 → LuxLevel (ca. 0-2040, passt zu Kamera-Metadaten)
+            atomic_store(&g_videoLuma, (int64_t)avg);
+            atomic_store(&g_videoLux, (int64_t)(avg * 8));
+        }
+        CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+    }
 }
 
 static void pumpDecoder(void) {
@@ -969,6 +999,47 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             CVBufferSetAttachment(dst, (CFStringRef)@"RotationDegrees",
                 zeroCF, kCVAttachmentMode_ShouldPropagate);
         }
+        // VIDEO-DRIVEN METADATA (Schritt 1): MetadataDictionary konsistent
+        // zum OBS-Feed setzen — ExposureTime aus Config, LuxLevel aus der
+        // gemessenen Video-Helligkeit, SNR aus Config, SensorID vom Original.
+        if (atomic_load(&g_metaOn)) {
+            CFDictionaryRef meta = NULL;
+            if (pbAtts) meta = CFDictionaryGetValue(pbAtts, (CFStringRef)@"MetadataDictionary");
+            CFNumberRef sensorID = meta
+                ? CFDictionaryGetValue(meta, (CFStringRef)@"SensorID") : NULL;
+
+            int64_t lux = atomic_load(&g_videoLux);
+            float expt = g_metaExposure;
+            float snr = g_metaSnr;
+            CFNumberRef exptN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &expt);
+            CFNumberRef luxN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &lux);
+            CFNumberRef snrN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &snr);
+            CFNumberRef snrNorm = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &snr);
+
+            const void *keys[] = { CFSTR("ExposureTime"), CFSTR("LuxLevel"),
+                                   CFSTR("SNR"), CFSTR("NormalizedSNR") };
+            const void *vals[] = { exptN, luxN, snrN, snrNorm };
+            CFDictionaryRef newMeta = CFDictionaryCreate(
+                kCFAllocatorDefault, keys, vals, 4,
+                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            CVBufferSetAttachment(dst, (CFStringRef)@"MetadataDictionary",
+                newMeta, kCVAttachmentMode_ShouldPropagate);
+            if (sensorID) {
+                // SensorID erhalten (Geräte-spezifisch, harmlos)
+                CFDictionaryRef m2 = CVBufferGetAttachments(dst, kCVAttachmentMode_ShouldPropagate);
+                CFDictionaryRef cur = m2 ? CFDictionaryGetValue(m2, (CFStringRef)@"MetadataDictionary") : NULL;
+                if (cur) {
+                    CFMutableDictionaryRef mut = CFDictionaryCreateMutableCopy(
+                        kCFAllocatorDefault, 0, cur);
+                    CFDictionarySetValue(mut, (CFStringRef)@"SensorID", sensorID);
+                    CVBufferSetAttachment(dst, (CFStringRef)@"MetadataDictionary",
+                        mut, kCVAttachmentMode_ShouldPropagate);
+                    CFRelease(mut);
+                }
+            }
+            CFRelease(exptN); CFRelease(luxN); CFRelease(snrN); CFRelease(snrNorm);
+            CFRelease(newMeta);
+        }
     }
 
     CVPixelBufferRelease(src);
@@ -1254,6 +1325,24 @@ static void statusServerThread(void) {
                     atomic_store(&g_diag, nr);
                     L("Diag jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "mdon=", 5) == 0) {
+                int nr = atoi(cmd + 5);
+                if (nr >= 0 && nr <= 1) {
+                    atomic_store(&g_metaOn, nr);
+                    L("Metadata-Rewrite jetzt %d", nr);
+                }
+            } else if (strncmp(cmd, "expt=", 5) == 0) {
+                float f = strtof(cmd + 5, NULL);
+                if (f > 0.0001f && f <= 1.0f) {
+                    g_metaExposure = f;
+                    L("ExposureTime jetzt %.6f", f);
+                }
+            } else if (strncmp(cmd, "snr=", 4) == 0) {
+                float f = strtof(cmd + 4, NULL);
+                if (f > 0.0f && f <= 100.0f) {
+                    g_metaSnr = f;
+                    L("SNR jetzt %.1f", f);
+                }
             } else if (strncmp(cmd, "fulldump", 8) == 0) {
                 wantFullDump = 1;
             }
@@ -1265,7 +1354,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d luma=%lld lux=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             (int)atomic_load(&g_stage),
@@ -1307,6 +1396,9 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_dupSkip),
             (int)atomic_load(&g_useCountDelay),
             (int)atomic_load(&g_diag),
+            (int)atomic_load(&g_metaOn),
+            (long long)atomic_load(&g_videoLuma),
+            (long long)atomic_load(&g_videoLux),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
