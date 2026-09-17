@@ -322,11 +322,133 @@ static void ShowOverlayIfUnlocked(void) {
     });
 }
 
-// ---------------------------------------------------------------- Banner-Target
+// ---------------------------------------------------------------- Inject-Status (TCP 8769)
+#define INJECT_PORT 8769
+
+static NSString *InjectCmd(NSString *cmd) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return nil;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(INJECT_PORT);
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0) { close(fd); return nil; }
+    if (cmd && cmd.length > 0) {
+        send(fd, [cmd UTF8String], strlen([cmd UTF8String]), 0);
+    }
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 300000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    NSMutableData *d = [NSMutableData data];
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        [d appendBytes:buf length:(NSUInteger)n];
+    }
+    close(fd);
+    if (d.length == 0) return nil;
+    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+}
+
+static NSString *StatusField(NSString *status, NSString *key) {
+    NSString *prefix = [key stringByAppendingString:@"="];
+    for (NSString *tok in [status componentsSeparatedByCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]]) {
+        if ([tok hasPrefix:prefix]) {
+            return [tok substringFromIndex:prefix.length];
+        }
+    }
+    return nil;
+}
+
+// ---------------------------------------------------------------- Banner-Target + Panel
 @interface VCamBannerTarget : NSObject
 - (void)buttonTapped:(UIButton *)btn;
 - (void)pan:(UIPanGestureRecognizer *)pan;
 @end
+
+static UIView *g_panelView = nil;
+static UILabel *g_connDot = nil;
+static UILabel *g_statusLabel = nil;
+static NSArray<NSArray<UIButton *> *> *g_modeRows = nil;
+static UIButton *g_rngRow[2] = { nil, nil };
+static NSTimer *g_pollTimer = nil;
+static BOOL g_pollRunning = NO;
+
+static UIButton *mkBtn(CGRect r, NSString *title, int tag) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = r;
+    b.tag = tag;
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    b.backgroundColor = [UIColor colorWithWhite:0.22 alpha:1.0];
+    b.layer.cornerRadius = 8;
+    b.layer.borderWidth = 1;
+    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+    return b;
+}
+
+static void setActive(NSArray<UIButton *> *row, int value) {
+    for (UIButton *b in row) {
+        BOOL on = (b.tag == value);
+        b.backgroundColor = on ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0]
+                              : [UIColor colorWithWhite:0.22 alpha:1.0];
+    }
+}
+
+static void updatePanelFromStatus(NSString *st) {
+    if (!st) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_connDot) g_connDot.backgroundColor = [UIColor redColor];
+            if (g_statusLabel) g_statusLabel.text = @"Keine Verbindung zu mediaserverd";
+        });
+        return;
+    }
+    NSString *build = StatusField(st, @"build");
+    NSString *stage = StatusField(st, @"stage");
+    NSString *rot = StatusField(st, @"rot");
+    NSString *rotv = StatusField(st, @"rotv");
+    NSString *rote = StatusField(st, @"rote");
+    NSString *rng = StatusField(st, @"rng");
+    NSString *frame = StatusField(st, @"hasFrame");
+    NSString *rxNal = StatusField(st, @"rxNal");
+    NSString *swap = StatusField(st, @"inplace");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_connDot) g_connDot.backgroundColor = [UIColor greenColor];
+        if (g_statusLabel) {
+            g_statusLabel.text = [NSString stringWithFormat:
+                @"stage=%@  frame=%@  NAL=%@  swaps=%@\nbuild=%@",
+                stage ?: @"?", frame ?: @"0", rxNal ?: @"0", swap ?: @"0", build ?: @"?"];
+        }
+        if (g_modeRows.count >= 3) {
+            setActive(g_modeRows[0], rot ? rot.intValue : 1);
+            setActive(g_modeRows[1], rotv ? rotv.intValue : 1);
+            setActive(g_modeRows[2], rote ? rote.intValue : 1);
+        }
+        BOOL rngOn = rng && rng.intValue == 1;
+        if (g_rngRow[0]) g_rngRow[0].backgroundColor = !rngOn ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0] : [UIColor colorWithWhite:0.22 alpha:1.0];
+        if (g_rngRow[1]) g_rngRow[1].backgroundColor = rngOn ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0] : [UIColor colorWithWhite:0.22 alpha:1.0];
+    });
+}
+
+static void pollInjectStatus(void) {
+    if (g_pollRunning) return;
+    g_pollRunning = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *st = InjectCmd(nil);
+        updatePanelFromStatus(st);
+        g_pollRunning = NO;
+    });
+}
+
+static void sendCmdAndPoll(NSString *cmd) {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *st = InjectCmd(cmd);
+        updatePanelFromStatus(st);
+        if (st) pollInjectStatus();   // zweiter Read für Sicherheit
+    });
+}
+
 @implementation VCamBannerTarget {
     CGPoint _panStart;
 }
@@ -335,37 +457,138 @@ static void ShowOverlayIfUnlocked(void) {
     VCamOverlayWindow *w = (VCamOverlayWindow *)g_overlayWindow;
     if (![w isKindOfClass:[VCamOverlayWindow class]]) return;
 
-    UIView *panel = w.interactivePanel;
-    if (panel && !panel.hidden) {
-        panel.hidden = YES;   // Panel schließen
+    if (g_panelView && !g_panelView.hidden) {
+        g_panelView.hidden = YES;
+        [g_pollTimer invalidate];
+        g_pollTimer = nil;
         return;
     }
-    if (!panel) {
-        // Info-Panel einmalig erstellen
-        panel = [[UIView alloc] initWithFrame:CGRectMake(16, 70, 280, 90)];
-        panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.95];
-        panel.layer.cornerRadius = 14;
+
+    if (!g_panelView) {
+        // ---- Panel einmalig aufbauen ----
+        CGFloat pw = 300.0;
+        CGRect screenB = [UIScreen mainScreen].bounds;
+        CGFloat px = screenB.size.width - pw - 14.0;
+        CGFloat py = 196.0;
+        CGFloat ph = 452.0;
+        if (py + ph > screenB.size.height - 12) py = screenB.size.height - ph - 12;
+
+        UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(px, py, pw, ph)];
+        panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.96];
+        panel.layer.cornerRadius = 16;
         panel.layer.borderWidth = 1.0;
         panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
 
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, 252, 30)];
-        lbl.text = @"VCamUSB aktiv";
-        lbl.textColor = [UIColor whiteColor];
-        lbl.font = [UIFont boldSystemFontOfSize:16];
-        [panel addSubview:lbl];
+        // Header
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 22)];
+        title.text = @"VCamUSB";
+        title.textColor = [UIColor whiteColor];
+        title.font = [UIFont boldSystemFontOfSize:18];
+        [panel addSubview:title];
 
-        UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(14, 42, 252, 40)];
-        sub.text = [NSString stringWithFormat:@"Clients: %d\nWebSocket 127.0.0.1:%d", g_clientCount, WS_PORT];
-        sub.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
-        sub.font = [UIFont systemFontOfSize:12];
-        sub.numberOfLines = 2;
-        [panel addSubview:sub];
+        g_connDot = [[UILabel alloc] initWithFrame:CGRectMake(pw - 40, 12, 24, 24)];
+        g_connDot.layer.cornerRadius = 12;
+        g_connDot.clipsToBounds = YES;
+        g_connDot.backgroundColor = [UIColor redColor];
+        [panel addSubview:g_connDot];
+
+        g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 40, pw - 32, 40)];
+        g_statusLabel.text = @"Verbinde…";
+        g_statusLabel.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
+        g_statusLabel.font = [UIFont systemFontOfSize:11];
+        g_statusLabel.numberOfLines = 2;
+        [panel addSubview:g_statusLabel];
+
+        // Stage
+        CGFloat y = 86;
+        UILabel *stageLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 100, 20)];
+        stageLbl.text = @"STAGE";
+        stageLbl.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+        stageLbl.font = [UIFont boldSystemFontOfSize:12];
+        [panel addSubview:stageLbl];
+        CGFloat bw = 58, bh = 34, gap = 8;
+        NSArray *stageTitles = @[@"AUS", @"FOTO", @"LIVE", @"VOLL"];
+        for (int i = 0; i < 4; i++) {
+            UIButton *b = mkBtn(CGRectMake(16 + i * (bw + gap), y + 22, bw, bh), stageTitles[i], i);
+            [b addTarget:self action:@selector(stageBtn:)
+                forControlEvents:UIControlEventTouchUpInside];
+            [panel addSubview:b];
+        }
+        y += 62;
+
+        // Drei Rotations-Zeilen
+        NSArray *rowTitles = @[@"FOTO rot", @"VIDEO rotv", @"ENC rote"];
+        NSMutableArray *rows = [NSMutableArray array];
+        for (int r = 0; r < 3; r++) {
+            UILabel *rl = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 100, 20)];
+            rl.text = rowTitles[r];
+            rl.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+            rl.font = [UIFont boldSystemFontOfSize:12];
+            [panel addSubview:rl];
+            NSMutableArray *row = [NSMutableArray array];
+            for (int i = 0; i < 4; i++) {
+                UIButton *b = mkBtn(CGRectMake(16 + i * (bw + gap), y + 22, bw, bh),
+                                    [NSString stringWithFormat:@"%d", i], i);
+                b.tag = r * 10 + i;   // Zeile im Tag kodieren
+                [b addTarget:self action:@selector(rotBtn:)
+                    forControlEvents:UIControlEventTouchUpInside];
+                [panel addSubview:b];
+                [row addObject:b];
+            }
+            [rows addObject:row];
+            y += 62;
+        }
+        g_modeRows = rows;
+
+        // Range
+        UILabel *rnl = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 100, 20)];
+        rnl.text = @"RANGE rng";
+        rnl.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+        rnl.font = [UIFont boldSystemFontOfSize:12];
+        [panel addSubview:rnl];
+        g_rngRow[0] = mkBtn(CGRectMake(16, y + 22, bw, bh), @"AUS", 0);
+        g_rngRow[1] = mkBtn(CGRectMake(16 + bw + gap, y + 22, bw, bh), @"AN", 1);
+        [g_rngRow[0] addTarget:self action:@selector(rngBtn:)
+            forControlEvents:UIControlEventTouchUpInside];
+        [g_rngRow[1] addTarget:self action:@selector(rngBtn:)
+            forControlEvents:UIControlEventTouchUpInside];
+        [panel addSubview:g_rngRow[0]];
+        [panel addSubview:g_rngRow[1]];
+        y += 62;
+
+        // Footer
+        UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(16, y + 2, pw - 32, 18)];
+        foot.text = @"WS 127.0.0.1:8767  ·  Tip: grünen Kreis verschieben";
+        foot.textColor = [UIColor colorWithWhite:0.45 alpha:1.0];
+        foot.font = [UIFont systemFontOfSize:10];
+        [panel addSubview:foot];
 
         [w.rootViewController.view addSubview:panel];
         w.interactivePanel = panel;
+        g_panelView = panel;
     }
-    panel.hidden = NO;
+    g_panelView.hidden = NO;
+    pollInjectStatus();
+    if (!g_pollTimer) {
+        g_pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+            pollInjectStatus();
+        }];
+    }
 }
+
+- (void)stageBtn:(UIButton *)b {
+    sendCmdAndPoll([NSString stringWithFormat:@"stage=%ld", (long)b.tag]);
+}
+- (void)rotBtn:(UIButton *)b {
+    int row = (int)b.tag / 10;
+    int val = (int)b.tag % 10;
+    NSString *key = row == 0 ? @"rot" : (row == 1 ? @"rotv" : @"rote");
+    sendCmdAndPoll([NSString stringWithFormat:@"%@=%d", key, val]);
+}
+- (void)rngBtn:(UIButton *)b {
+    sendCmdAndPoll([NSString stringWithFormat:@"rng=%ld", (long)b.tag]);
+}
+
 - (void)pan:(UIPanGestureRecognizer *)pan {
     UIView *v = pan.view;
     if (pan.state == UIGestureRecognizerStateBegan) {
