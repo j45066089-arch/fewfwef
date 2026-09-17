@@ -739,11 +739,16 @@ class FramePusher:
                                 cur_au.append(nal)
                         await asyncio.sleep(0.001)
             except Exception as e:
-                import traceback as _tb
-                log.error("pusher exception: %s\n%s", e, _tb.format_exc())
                 self.state["connected"] = False
                 if not self._closed:
-                    log.warning("link down (%s), retrying in 2s", e)
+                    # Freundlicher Retry: erster Fehler erklärt sich selbst,
+                    # danach nur alle 30s eine Statuszeile (kein Traceback-Spam).
+                    now = time.monotonic()
+                    if now - getattr(self, "_lastLinkLog", 0) > 30:
+                        self._lastLinkLog = now
+                        log.info("Warte auf iPhone (ws://%s:%s) — Tunnel an? "
+                                 "Gerät verbunden? (%s) Retry alle 2s…",
+                                 self.ip, self.port, e)
                 await asyncio.sleep(2)
 
     def close(self):
