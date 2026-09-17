@@ -92,10 +92,10 @@ static _Atomic uint64_t g_skipPortrait = 0;
 static _Atomic int64_t g_rotMode = 1;
 // VIDEO-PFAD (420v) nach Größenklasse getrennt:
 //   g_rotVidMode: 420v AUßER 1920x1080 (Live-Preview-Feed 2304x1296) — CW.
-//   g_rotEncMode: 420v 1920x1080 (Encoder-Feed) — CCW. Die App dreht diesen
-//   Feed beim Speichern nochmal CW90 (Matrix) — CCW-Inhalt wird dadurch aufrecht.
+//   g_rotEncMode: 420v 1920x1080 (Encoder-Feed) — CW (per Quadranten-Test
+//   verifiziert: CW-Inhalt + App-Matrix/Spiegel = aufrecht).
 static _Atomic int64_t g_rotVidMode = 1;
-static _Atomic int64_t g_rotEncMode = 2;
+static _Atomic int64_t g_rotEncMode = 1;
 // RANGE-KONVERTIERUNG (Status-Port "rng=N"): 0=aus (Pipeline behandelt die
 // 420v-Buffer intern als Full-Range — Konvertieren wäscht Farben aus),
 // 1=an (Full->Video wie früher).
