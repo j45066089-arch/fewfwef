@@ -266,11 +266,12 @@ function sendTransform(force) {
 }
 function updInfo() { $('pInfo').textContent = tr.zoom.toFixed(1)+'x | '+tr.panX.toFixed(2)+', '+tr.panY.toFixed(2)+(tr.rotation?' | '+tr.rotation+'°':'')+(tr.flipH?' | MIRROR':''); }
 
-// ── Drag = Pan, Wheel = Zoom (mit lokaler CSS-Vorschau: Bild folgt Maus sofort) ──
+// ── Drag = Pan, Wheel = Zoom (lokale Vorschau: Bild folgt Maus 1:1, Server synct nach) ──
 const box = $('pBox');
 const pImgEl = $('pImg');
 let drag = null;
-let serverTr = null;   // zuletzt vom Server bestätigter Transform (Echo)
+let serverTr = null;   // zuletzt vom Server bestätigter Transform (Basis der lokalen Vorschau)
+let pvBusyUntil = 0;   // bis wann Vorschau-Refresh pausiert (Drag/Zoom aktiv)
 function localPreview() {
   if (!serverTr || !gRunning || !pImgEl.style.display) return;
   const dz = (serverTr.zoom && tr.zoom) ? tr.zoom / serverTr.zoom : 1;
@@ -280,6 +281,7 @@ function localPreview() {
   pImgEl.style.transform = `translate(${dx}px, ${dy}px) scale(${dz})`;
 }
 function clearLocalPreview() { pImgEl.style.transform = ''; }
+function pausePreview(ms) { pvBusyUntil = Date.now() + ms; }
 box.addEventListener('mousedown', e => {
   if (eye) {
     // eyedropper: bg color from preview pixel
@@ -297,6 +299,7 @@ box.addEventListener('mousedown', e => {
     return;
   }
   drag = { x:e.clientX, y:e.clientY, px:tr.panX, py:tr.panY };
+  pausePreview(60000);
   e.preventDefault();
 });
 window.addEventListener('mousemove', e => {
@@ -310,15 +313,14 @@ window.addEventListener('mouseup', () => {
   if (drag) {
     drag = null;
     sendTransform(true);
-    // lokale Verschiebung nach 250ms ausblenden — Server hat dann übernommen
-    setTimeout(clearLocalPreview, 250);
+    pausePreview(400);   // Server-Frames wieder zulassen, sobald übernommen
   }
 });
 box.addEventListener('wheel', e => {
   e.preventDefault();
-  tr.zoom = Math.max(0.1, Math.min(10, tr.zoom + (e.deltaY<0 ? tr.zoom*0.01 : -tr.zoom*0.01)));
-  updInfo(); sendTransform(); localPreview();
-  setTimeout(clearLocalPreview, 250);
+  tr.zoom = Math.max(0.1, Math.min(10, e.deltaY < 0 ? tr.zoom * 1.03 : tr.zoom / 1.03));
+  updInfo(); sendTransform(true); localPreview();
+  pausePreview(400);
 }, {passive:false});
 
 function mirror() { tr.flipH = !tr.flipH; updInfo(); clearLocalPreview(); sendTransform(true); }
@@ -485,8 +487,16 @@ async function poll() {
     $('sFps').textContent = s.fps;
     $('sSent').textContent = s.mb_sent.toFixed(1) + ' MB';
     $('sUp').textContent = fmtUp(s.uptime);
-    // Zustands-Echo: Regler an den echten Serverzustand angleichen
-    if (s.transform) serverTr = s.transform;   // Basis für lokale Drag-Vorschau
+    // Zustands-Echo: Basis für lokale Drag-Vorschau (nur wenn nicht aktiv gezogen wird)
+    if (s.transform && !drag) {
+      serverTr = s.transform;
+      // Server hat übernommen → lokale Vorschau ausblenden
+      if (Math.abs((s.transform.pan_x || 0) - tr.panX) < 0.01 &&
+          Math.abs((s.transform.pan_y || 0) - tr.panY) < 0.01 &&
+          Math.abs((s.transform.zoom || 1) - tr.zoom) < 0.01) {
+        clearLocalPreview();
+      }
+    }
     if (s.transform && !drag && !tTimer) {
       tr = { zoom:s.transform.zoom, panX:s.transform.pan_x, panY:s.transform.pan_y,
              flipH:s.transform.flip_h, rotation:s.transform.rotation };
@@ -520,10 +530,11 @@ function fmtUp(s) {
   const m = Math.floor(s/60), sec = s%60;
   return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
 }
-// ── Schnelle Vorschau (100ms), unabhängig vom Stats-Poll ──
+// ── Schnelle Vorschau (50ms), pausiert während Drag/Zoom ──
 let gRunning = false;
 function refreshPreview() {
-  if (!gRunning) return;
+  if (!gRunning || drag || Date.now() < pvBusyUntil) return;
+  if (pImgEl.style.transform) return;   // lokale Vorschau aktiv → nicht mit Server-Frames mischen
   $('pImg').src = '/preview.jpg?t=' + Date.now();
 }
 loadCams(); poll(); setInterval(poll, 500);
