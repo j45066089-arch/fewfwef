@@ -35,6 +35,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,7 +51,13 @@ DASHBOARD_PORT = 8080
 DEFAULT_DEVICE = "OBS Virtual Camera"
 WIDTH, HEIGHT = 1920, 1080
 DEFAULT_FPS = 30
-DASH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
+def _resource_path(name):
+    """PyInstaller-Bundle-kompatibel: Dateien aus _MEIPASS oder neben dem Skript."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+DASH_PATH = _resource_path("dashboard.html")
 UPLOAD_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "vcamusb_uploads")
 
 
