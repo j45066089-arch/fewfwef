@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-probe-5"
+#define VCAM_BUILD_ID "ios18-start-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -2106,11 +2106,18 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
     orig_stRender(self, _cmd, sampleBuffer, input);
 }
 
-// ---------------------------------------------------------------- ctor
-%ctor {
+// ---------------------------------------------------------------- Init (aufrufbar statt nur ctor)
+// iOS 18: ElleKit/opainject führen den %ctor nicht aus. Deshalb ist die Init eine
+// exportierte Funktion VCamInject_start(), die ein Injektor gezielt per dlsym+Call
+// aufrufen kann. Idempotent (Guard), damit doppelter Aufruf (ctor + manuell) safe ist.
+static _Atomic int g_started = 0;
+
+__attribute__((visibility("default")))
+void VCamInject_start(void) {
+    if (atomic_exchange(&g_started, 1)) return;   // idempotent
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    FLOG("ctor: proc=%s pid=%d build=%s\n", [proc UTF8String] ?: "?", getpid(), VCAM_BUILD_ID);
+    FLOG("start: proc=%s pid=%d build=%s\n", [proc UTF8String] ?: "?", getpid(), VCAM_BUILD_ID);
     // iOS 16: mediaserverd ist der Capture-Server.
     // iOS 18: cameracaptured ist der Nachfolger (BW-Klassen + VideoToolbox-Decoder,
     //   verifiziert über UFATM obsvcameraclone: isEqualToString@"cameracaptured").
@@ -2226,4 +2233,10 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
         statusServerThread();
     });
     L("bereit — stage 0 aktiv");
+}
+
+// Fallback-ctor: nur für Umgebungen, die den ctor doch ausführen (z.B. iOS 16 ElleKit).
+__attribute__((constructor))
+static void vcaminject_ctor_fallback(void) {
+    VCamInject_start();
 }

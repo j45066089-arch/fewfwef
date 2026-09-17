@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcinject
+Name: VCInject
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: Runtime injector (dlopen + VCamInject_start) for cameracaptured
+Maintainer: nikeboy
+Author: nikeboy
+Section: System
+Depends: firmware (>= 14.0)
