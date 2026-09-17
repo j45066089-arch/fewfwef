@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "metafix-2026-09-17-01"
+#define VCAM_BUILD_ID "ios18-probe-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -2072,7 +2072,16 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    if (![proc isEqualToString:@"mediaserverd"]) return;
+    // iOS 18 hat kein mediaserverd mehr -> Capture auf mehrere Daemons verteilt.
+    // Diagnose-Phase: in allen laden und loggen, welcher die BW-Klassen hostet.
+    static NSSet<NSString *> *captureProcs = nil;
+    if (!captureProcs) {
+        captureProcs = [NSSet setWithArray:@[
+            @"mediaserverd", @"cameracaptured", @"corecaptured", @"applecamerad"
+        ]];
+    }
+    if (![captureProcs containsObject:proc]) return;
+    L("Capture-Daemon erkannt: %@", proc);
 
     // LORDVCAM-STIL (1): Private Frameworks VOR dem Hooken laden.
     // Sonst existieren die BW*-Klassen beim Hooken evtl. noch nicht.

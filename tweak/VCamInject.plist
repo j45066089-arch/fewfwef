@@ -7,10 +7,16 @@
 		<key>Bundles</key>
 		<array>
 			<string>com.apple.mediaserverd</string>
+			<string>com.apple.cameracaptured</string>
+			<string>com.apple.corecaptured</string>
+			<string>com.apple.applecamerad</string>
 		</array>
 		<key>Executables</key>
 		<array>
 			<string>mediaserverd</string>
+			<string>cameracaptured</string>
+			<string>corecaptured</string>
+			<string>applecamerad</string>
 		</array>
 	</dict>
 </dict>
