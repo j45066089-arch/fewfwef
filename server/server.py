@@ -104,26 +104,32 @@ def local_ips():
 
 # ---------------------------------------------------------------- Transform + Filters
 def apply_filters(frame, flt):
-    """brightness in [-1,1] as offset multiplier, contrast/saturation/gamma around 1."""
+    """LordVCAM-Formel als LUT (wie vImageTableLookUp in 4cc9c.c:1952-1995):
+    Y:  out = clamp(255 * pow(contrast*(v/255-0.5)+0.5+brightness, gamma))  (gamma nur wenn >0)
+    UV: out = clamp(saturation*(uv-128)+128)"""
     b = flt.get("brightness", 0.0)
     c = flt.get("contrast", 1.0)
     s = flt.get("saturation", 1.0)
     g = flt.get("gamma", 1.0)
-    if abs(b) > 0.001:
-        # brightness: scale pixel values (multiplicative like LordVCAM CSS mapping)
-        frame = cv2.convertScaleAbs(frame, alpha=1.0 + b, beta=0)
-    if abs(c - 1.0) > 0.001:
-        frame = cv2.convertScaleAbs(frame, alpha=c, beta=128.0 * (1.0 - c))
-    if abs(s - 1.0) > 0.001:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * s, 0, 255)
-        frame = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    if abs(g - 1.0) > 0.001:
-        inv = 1.0 / max(0.05, g)
-        lut = np.array([np.clip((i / 255.0) ** inv, 0, 1) * 255
-                        for i in range(256)], dtype=np.uint8)
-        frame = cv2.LUT(frame, lut)
-    return frame
+    need_y = abs(b) > 0.001 or abs(c - 1.0) > 0.001 or abs(g - 1.0) > 0.001
+    need_uv = abs(s - 1.0) > 0.001
+    if not (need_y or need_uv):
+        return frame
+    yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+    if need_y:
+        lut = np.empty(256, dtype=np.uint8)
+        for v in range(256):
+            f = c * (v / 255.0 - 0.5) + 0.5 + b
+            if abs(g - 1.0) > 0.001 and f > 0.0:
+                f = f ** g
+            lut[v] = min(255, max(0, int(f * 255.0 + 0.5)))
+        yuv[:, :, 0] = cv2.LUT(yuv[:, :, 0], lut)
+    if need_uv:
+        lut = np.array([min(255, max(0, int(s * (x - 128.0) + 128.0 + 0.5)))
+                        for x in range(256)], dtype=np.uint8)
+        yuv[:, :, 1] = cv2.LUT(yuv[:, :, 1], lut)
+        yuv[:, :, 2] = cv2.LUT(yuv[:, :, 2], lut)
+    return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
 
 def compose_frame(src, W, H, tr):
