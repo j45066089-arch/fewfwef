@@ -58,6 +58,9 @@ def _resource_path(name):
 
 
 DASH_PATH = _resource_path("dashboard.html")
+# ffmpeg: gebündelte EXE bevorzugen (PyInstaller --add-binary), sonst PATH
+_ff_bundled = _resource_path("ffmpeg.exe")
+FFMPEG_BIN = _ff_bundled if os.path.exists(_ff_bundled) else "ffmpeg"
 UPLOAD_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "vcamusb_uploads")
 
 
@@ -84,7 +87,7 @@ def list_cameras():
     """DirectShow camera list via ffmpeg."""
     try:
         out = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            [FFMPEG_BIN, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
             capture_output=True, text=True, timeout=30,
         )
         cams = []
@@ -220,7 +223,7 @@ class SourceReader:
         except OSError:
             self.fflog = None
         creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+        cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
                "-f", "dshow", "-i", f"video={name}",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{WIDTH}x{HEIGHT}", "-r", "30", "-"]
@@ -405,7 +408,7 @@ class Encoder:
         except OSError:
             self.fflog = None
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+            [FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
              "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}",
              "-r", str(self.fps), "-i", "-",
              "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
