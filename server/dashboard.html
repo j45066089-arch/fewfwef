@@ -453,9 +453,9 @@ function renderLeak(t) {
     ? ok(t.inplace + ' Swaps')
     : (stage >= 3 ? warn('Stage 3, noch keine Swaps') : warn('Stage ' + stage + ' (nicht VOLL)'))]);
   rows.push(['DECODER', parseInt(t.errors || '0') === 0 ? ok('0 Fehler') : warn(t.errors + ' Fehler')]);
-  rows.push(['FORMAT', t.origSize && t.origSize === t.decodedSize
-    ? ok(t.origSize)
-    : warn('Feed ' + t.decodedSize + ' vs nativ ' + t.origSize)]);
+  rows.push(['FORMAT', (!t.origSize || t.origSize === '0' || t.origSize === '0x0')
+    ? warn('warte auf Kamera-Start')
+    : (t.origSize === t.decodedSize ? ok(t.origSize) : warn('Feed ' + t.decodedSize + ' vs nativ ' + t.origSize))]);
   rows.push(['MOTION', bad('offen (Schritt 3)')]);
   rows.push(['DEPTH', bad('offen (Schritt 4)')]);
   rows.push(['FOTO-EXIF', warn('manuell prüfen (ExifTool)')]);

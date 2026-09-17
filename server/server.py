@@ -970,7 +970,7 @@ class Dashboard:
     @staticmethod
     def _parse_tweak(txt):
         out = {}
-        for m in re.finditer(r"(\w+)=([\d.]+)", txt or ""):
+        for m in re.finditer(r"(\w+)=([^\s]+)", txt or ""):
             out[m.group(1)] = m.group(2)
         return out
 
