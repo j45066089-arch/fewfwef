@@ -1,7 +1,5 @@
 """USB-Tunnel: PC-Port 8767 -> iPhone-Port 8767."""
 import asyncio
-import sys
-sys.path.insert(0, r"C:\Users\shosh\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages")
 from pymobiledevice3.tcp_forwarder import UsbmuxTcpForwarder
 
 async def main():
