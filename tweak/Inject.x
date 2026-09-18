@@ -1723,12 +1723,16 @@ static void statusServerThread(void) {
             } else if (strncmp(cmd, "motionprobe", 11) == 0) {
                 // MOTION-PROBE: CMMotionManager im Daemon testen (einmalig starten)
                 static CMMotionManager *mm = nil;
+                static NSOperationQueue *mq = nil;
                 if (!mm) {
                     mm = [[CMMotionManager alloc] init];
+                    mq = [[NSOperationQueue alloc] init];
+                    mq.maxConcurrentOperationCount = 1;
+                    mq.qualityOfService = NSQualityOfServiceUserInitiated;
                     if ([mm isGyroAvailable]) {
                         atomic_store(&g_motionAvail, 1);
                         [mm setGyroUpdateInterval:1.0/30.0];
-                        [mm startGyroUpdatesToQueue:[NSOperationQueue mainQueue]
+                        [mm startGyroUpdatesToQueue:mq
                             withHandler:^(CMGyroData *d, NSError *e) {
                                 if (d) {
                                     atomic_store(&g_motionRx, d.rotationRate.x);
