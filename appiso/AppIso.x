@@ -238,9 +238,7 @@ static void installCCCHooks(Class cls) {
         const char *nm = sel_getName(method_getName(methods[i]));
         if (strstr(nm, "ISO") || strstr(nm, "Exposure") || strstr(nm, "Sample") ||
             strstr(nm, "Metadata") || strstr(nm, "Frame") || strstr(nm, "iso")) {
-            char type[64];
-            method_getTypeEncoding(methods[i], type, sizeof(type));
-            APILOG("  %s :: %s\n", nm, type);
+            APILOG("  %s :: %s\n", nm, method_getTypeEncoding(methods[i]));
         }
     }
     free(methods);
