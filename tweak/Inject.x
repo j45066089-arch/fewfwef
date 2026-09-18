@@ -1229,6 +1229,10 @@ static _Atomic uint32_t g_appInjectCount = 0;   // Daemon: wie oft App-Hook geme
 static _Atomic uint64_t g_appCacheReported = 0; // Daemon: App-Cache-Wert (von App gesetzt)
 static _Atomic uint64_t g_isoPublishCount = 0;  // Daemon: wie oft publiziert
 static _Atomic uint64_t g_getterReported = 0;   // Daemon: Getter-Zähler der App
+// App-seitig: Getter-Call-Zähler (beweist ob der Hook feuert)
+static _Atomic uint64_t g_getterCalls = 0;
+static _Atomic uint64_t g_figGetterCalls = 0;
+static _Atomic uint64_t g_getterReportNs = 0;
 
 static uint64_t monoNs(void) {
     static mach_timebase_info_data_t tb = {0};
@@ -1329,9 +1333,6 @@ static float (*orig_AVCaptureDevice_ISO)(id self, SEL _cmd);
 // FigCaptureDevice (privat, CMCaptureCore): Pro-Apps (ProCamera/Halide) lesen
 // die Live-ISO oft direkt dort statt über das öffentliche AVCaptureDevice.
 static float (*orig_FigCaptureDevice_iso)(id self, SEL _cmd);
-static _Atomic uint64_t g_getterCalls = 0;          // App: wie oft der Hook feuerte
-static _Atomic uint64_t g_figGetterCalls = 0;       // App: wie oft FigCapture-Hook feuerte
-static _Atomic uint64_t g_getterReportNs = 0;       // Throttle für Rückmeldung
 
 static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
     atomic_fetch_add(&g_getterCalls, 1);
