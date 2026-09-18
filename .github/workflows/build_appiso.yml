@@ -1,0 +1,41 @@
+name: Build AppIso
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'appiso/**'
+      - '.github/workflows/build_appiso.yml'
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Roothide Theos
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          git -C "$HOME/theos" rev-parse HEAD
+      - name: Install packaging dependencies
+        run: brew install ldid dpkg xz
+      - name: Build roothide package
+        working-directory: appiso
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+      - name: Inspect package
+        working-directory: appiso
+        run: |
+          for package in packages/*.deb; do
+            dpkg-deb -I "$package"
+            dpkg-deb -c "$package"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appiso-roothide-deb
+          path: appiso/packages/*.deb
+          if-no-files-found: error

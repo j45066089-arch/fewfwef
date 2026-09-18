@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcamappiso
+Name: NikeCam AppIso
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: ISO-Hook fuer App-Prozesse (AVCaptureDevice + FigCaptureDevice) — bildbasierte ISO via Darwin Notification
+Maintainer: nikeboy
+Author: nikeboy
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
