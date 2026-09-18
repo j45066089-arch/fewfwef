@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "portrait-fix-1"
+#define VCAM_BUILD_ID "antiflicker-atomic-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -130,9 +130,13 @@ static _Atomic int64_t g_rotEncMode = 1;
 static _Atomic int64_t g_rangeConv = 0;
 static _Atomic uint64_t g_rotApplied = 0;
 // ANTI-FLACKERN: mehrere Node-Outputs teilen sich dieselbe IOSurface.
+// Der check-then-set (lastSurfID/lastPts) war NICHT atomar: mehrere Threads mit
+// gleichem (surf,pts) rutschten gleichzeitig durch -> doppeltes Überschreiben
+// derselben Surface -> "doppeltes Bild + Farbstreifen" in der Video-Preview.
 static _Atomic int64_t g_lastSurfID = 0;
 static _Atomic int64_t g_lastPts = 0;
 static _Atomic uint64_t g_dupSkip = 0;
+static pthread_mutex_t g_dupMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------------------------------------------------------------- Stufen-Isolation (Astra)
 // stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
@@ -638,13 +642,20 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     IOSurfaceRef dupSurf = CVPixelBufferGetIOSurface(dst);
     int64_t dupSid = dupSurf ? (int64_t)IOSurfaceGetID(dupSurf) : 0;
     CMTime dupT = CMSampleBufferGetPresentationTimeStamp(original);
-    if (dupSid != 0 && atomic_load(&g_lastSurfID) == dupSid &&
-        atomic_load(&g_lastPts) == dupT.value) {
+    // ATOMARER Check-and-set: nur EIN Thread darf pro (surf,pts) durch. Die
+    // konkurrierenden Outputs derselben Surface (OUT[87..95] teilten surf=288)
+    // überschrieben sich sonst gegenseitig -> doppelt + Farbstreifen.
+    pthread_mutex_lock(&g_dupMutex);
+    BOOL isDup = (dupSid != 0 && atomic_load(&g_lastSurfID) == dupSid &&
+                  atomic_load(&g_lastPts) == dupT.value);
+    if (isDup) {
         atomic_fetch_add(&g_dupSkip, 1);
+        pthread_mutex_unlock(&g_dupMutex);
         return NO;
     }
     atomic_store(&g_lastSurfID, dupSid);
     atomic_store(&g_lastPts, (int64_t)dupT.value);
+    pthread_mutex_unlock(&g_dupMutex);
 
     // RECORDING-FIX: 420v-Buffer NICHT mehr blind überspringen. Der
     // Movie-Sink (BWQuickTimeMovieFileSinkNode) erbt sein renderSampleBuffer:
