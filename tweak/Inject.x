@@ -263,7 +263,19 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
             uint32_t avg = cnt ? (uint32_t)(sum / cnt) : 0;
             // Luminanz 0-255 → LuxLevel (ca. 0-2040, passt zu Kamera-Metadaten)
             atomic_store(&g_videoLuma, (int64_t)avg);
-            atomic_store(&g_videoLux, (int64_t)(avg * 8));
+            int64_t lux = (int64_t)(avg * 8);
+            atomic_store(&g_videoLux, lux);
+            // DEVICE-ISO-FIX: bildbasierte ISO sofort hier schreiben (nicht erst
+            // beim Swap-Erfolg) — damit App-Prozesse sie lesen können, sobald
+            // der Decoder läuft. Gleiche Formel wie im mdon-Pfad.
+            int64_t isoCfg = atomic_load(&g_metaIso);
+            int64_t iso = isoCfg > 0 ? isoCfg : (int64_t)(120000.0 / (double)(lux + 1));
+            if (iso < 50) iso = 50;
+            if (iso > 3200) iso = 3200;
+            if (atomic_load(&g_curIso) != iso) {
+                atomic_store(&g_curIso, iso);
+                writeIsoFile(iso);
+            }
         }
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
     }
@@ -1074,11 +1086,6 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                         : (int64_t)(120000.0 / (double)(lux + 1));
             if (iso < 50) iso = 50;
             if (iso > 3200) iso = 3200;
-            // DEVICE-ISO-FIX: berechnete ISO an App-Prozesse durchreichen.
-            if (atomic_load(&g_curIso) != iso) {
-                atomic_store(&g_curIso, iso);
-                writeIsoFile(iso);
-            }
             CFNumberRef exptN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &expt);
             CFNumberRef luxN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &lux);
             CFNumberRef isoN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &iso);
