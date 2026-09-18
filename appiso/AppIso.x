@@ -46,10 +46,6 @@ static uint64_t monoNs(void) {
     return mach_absolute_time() * tb.numer / tb.denom;
 }
 
-static uint64_t packIsoState(uint32_t iso, uint32_t seq) {
-    return ((uint64_t)seq << 32) | (uint64_t)iso;
-}
-
 // ---- Cache + Listener ----
 static int g_isoTokenApp = -1;
 static _Atomic uint32_t g_isoCacheValue = 0;
