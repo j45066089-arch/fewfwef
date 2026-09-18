@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "faceprobe-1"
+#define VCAM_BUILD_ID "motion-probe-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -37,6 +37,7 @@
 #import <string.h>
 #import <notify.h>
 #import <mach/mach_time.h>
+#import <CoreMotion/CoreMotion.h>
 
 #define WS_PORT 8767
 #define STATUS_PORT 8769
@@ -1553,6 +1554,11 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
 // FNumber/FocalLength/LensModel bleiben (Geräte-Wahrheit, korrekt).
 static char g_photoExifKeys[1024] = {0};        // Attachment-Key-Liste (Diagnose)
 static char g_faceProbe[8192] = {0};            // faceprobe-Ergebnis (Status)
+// MOTION-PROBE: Gyro-Werte direkt im Daemon (CMMotionManager)
+static _Atomic int g_motionAvail = -1;   // -1=ungetestet, 0=nein, 1=ja
+static _Atomic double g_motionRx = 0, g_motionRy = 0, g_motionRz = 0;
+static _Atomic uint64_t g_motionUpdates = 0;
+static char g_motionDiag[256] = {0};
 static _Atomic uint64_t g_photoExifCalls = 0;   // rewritePhotoExif aufgerufen
 static _Atomic uint64_t g_photoExifNoPx = 0;    // kein PixelBuffer
 static _Atomic uint64_t g_photoExifNoAtt = 0;   // kein {Exif}-Attachment
@@ -1714,6 +1720,35 @@ static void statusServerThread(void) {
                     atomic_store(&g_metaOn, nr);
                     L("Metadata-Rewrite jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "motionprobe", 11) == 0) {
+                // MOTION-PROBE: CMMotionManager im Daemon testen (einmalig starten)
+                static CMMotionManager *mm = nil;
+                if (!mm) {
+                    mm = [[CMMotionManager alloc] init];
+                    if ([mm isGyroAvailable]) {
+                        atomic_store(&g_motionAvail, 1);
+                        [mm setGyroUpdateInterval:1.0/30.0];
+                        [mm startGyroUpdatesToQueue:[NSOperationQueue mainQueue]
+                            withHandler:^(CMGyroData *d, NSError *e) {
+                                if (d) {
+                                    atomic_store(&g_motionRx, d.rotationRate.x);
+                                    atomic_store(&g_motionRy, d.rotationRate.y);
+                                    atomic_store(&g_motionRz, d.rotationRate.z);
+                                    atomic_fetch_add(&g_motionUpdates, 1);
+                                } else if (e) {
+                                    snprintf(g_motionDiag, sizeof(g_motionDiag), "err: %s",
+                                             [[e description] UTF8String] ?: "?");
+                                    atomic_store(&g_motionAvail, 0);
+                                }
+                            }];
+                        snprintf(g_motionDiag, sizeof(g_motionDiag), "gestartet (isGyroAvailable=YES)");
+                    } else {
+                        atomic_store(&g_motionAvail, 0);
+                        snprintf(g_motionDiag, sizeof(g_motionDiag), "isGyroAvailable=NO");
+                    }
+                } else {
+                    snprintf(g_motionDiag, sizeof(g_motionDiag), "bereits gestartet");
+                }
             } else if (strncmp(cmd, "faceprobe", 9) == 0) {
                 // FACE-PROBE: alle geladenen Klassen mit Face/Detector/Metadata im Namen
                 // + ihre relevanten Methoden — findet den Daemon-Face-Pfad (Astra-Punkt 1).
@@ -1827,7 +1862,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx exifCalls=%llu exifNoPx=%llu exifNoAtt=%llu exifDone=%llu facePath=%llu luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx exifCalls=%llu exifNoPx=%llu exifNoAtt=%llu exifDone=%llu facePath=%llu luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld motAv=%d motUpd=%llu motRx=%.4f motRy=%.4f motRz=%.4f "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1886,6 +1921,11 @@ static void statusServerThread(void) {
             (double)g_metaExposure,
             (double)g_metaSnr,
             (long long)atomic_load(&g_metaIso),
+            (int)atomic_load(&g_motionAvail),
+            (unsigned long long)atomic_load(&g_motionUpdates),
+            atomic_load(&g_motionRx),
+            atomic_load(&g_motionRy),
+            atomic_load(&g_motionRz),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
@@ -1926,6 +1966,10 @@ static void statusServerThread(void) {
         }
         if (g_photoExifKeys[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " photoAtts=%s\n", g_photoExifKeys);
+            if (mw > 0) w += mw;
+        }
+        if (g_motionDiag[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, " motionDiag=%s\n", g_motionDiag);
             if (mw > 0) w += mw;
         }
         if (g_faceProbe[0]) {
