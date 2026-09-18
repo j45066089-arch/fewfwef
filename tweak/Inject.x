@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "notify-iso-3"
+#define VCAM_BUILD_ID "notify-iso-4"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1223,7 +1223,10 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 // umgeht die mediaserverd-Sandbox (Datei-Experiment schlug fehl).
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
 #define VCAM_APPINJECT_NOTIFY "com.nikeboy.vcam.appinject"   // App -> Daemon Diagnose
+#define VCAM_APPCACHE_NOTIFY "com.nikeboy.vcam.appcache"     // App setzt State: gelesener Cache
 static _Atomic uint32_t g_appInjectCount = 0;   // Daemon: wie oft App-Hook gemeldet
+static _Atomic uint64_t g_appCacheReported = 0; // Daemon: App-Cache-Wert (von App gesetzt)
+static _Atomic uint64_t g_isoPublishCount = 0;  // Daemon: wie oft publiziert
 
 static uint64_t monoNs(void) {
     static mach_timebase_info_data_t tb = {0};
@@ -1268,6 +1271,7 @@ static void publishISO(uint32_t iso) {
     notify_post(VCAM_ISO_NOTIFY);
     atomic_store(&g_isoLastPublishNs, now);
     atomic_store(&g_isoLastPublished, iso);
+    atomic_fetch_add(&g_isoPublishCount, 1);
 }
 
 // ---- App-Seite: atomarer Cache + Listener ------------------------------
@@ -1286,6 +1290,12 @@ static void refreshIsoCache(void) {
     atomic_store(&g_isoCacheValue, iso);
     atomic_store(&g_isoCacheSeq, seq);
     atomic_store(&g_isoCacheAtNs, monoNs());
+    // Diagnose: gelesenen Wert an den Daemon zurückmelden (State, kein Signal nötig)
+    {
+        static int cacheTok = -1;
+        if (cacheTok < 0) notify_register_check(VCAM_APPCACHE_NOTIFY, &cacheTok);
+        if (cacheTok >= 0) notify_set_state(cacheTok, packIsoState(iso, seq));
+    }
 }
 
 static void startIsoListener(void) {
@@ -1543,6 +1553,17 @@ static void statusServerThread(void) {
                 wantFullDump = 1;
             }
         }
+        // DIAG: App-Cache-State lesen (App setzt ihn per notify_set_state)
+        {
+            static int acTok = -1;
+            if (acTok < 0) notify_register_check(VCAM_APPCACHE_NOTIFY, &acTok);
+            if (acTok >= 0) {
+                uint64_t raw = 0;
+                if (notify_get_state(acTok, &raw) == NOTIFY_STATUS_OK) {
+                    atomic_store(&g_appCacheReported, raw);
+                }
+            }
+        }
         char msg[16384];
         int w = snprintf(msg, sizeof(msg),
             "build=%s proc=%s stage=%d\n"
@@ -1550,7 +1571,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1596,6 +1617,8 @@ static void statusServerThread(void) {
             (int)atomic_load(&g_metaOn),
             (int)atomic_load(&g_portraitSwap),
             (unsigned)atomic_load(&g_appInjectCount),
+            (unsigned long long)atomic_load(&g_isoPublishCount),
+            (unsigned long long)atomic_load(&g_appCacheReported),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
