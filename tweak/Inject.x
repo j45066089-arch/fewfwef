@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "exif-fix-1"
+#define VCAM_BUILD_ID "exif-fix-2"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1533,8 +1533,61 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
 }
 
 // ---------------------------------------------------------------- BWPhotoEncoderNode
-// Beobachtung-only: Photo-Replacement bleibt deaktiviert.
+// FOTO-EXIF-FIX: Der PhotoEncoderNode backt die EXIF-Werte aus den
+// {Exif}-Attachments des Foto-Buffers ins JPEG/HEIC ein. Vor dem Encode
+// überschreiben wir ExposureTime (Dashboard expt=) und ISOSpeedRatings
+// (bildbasierte ISO) — so passt das EXIF zum Feed statt zum Sensor.
+// FNumber/FocalLength/LensModel bleiben (Geräte-Wahrheit, korrekt).
+static void rewritePhotoExif(CMSampleBufferRef sb) {
+    if (!sb) return;
+    CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+    if (!px) return;
+    CFDictionaryRef atts = CVBufferGetAttachments(px, kCVAttachmentMode_ShouldPropagate);
+    CFDictionaryRef exif = atts ? (CFDictionaryRef)CFDictionaryGetValue(atts, CFSTR("{Exif}")) : NULL;
+    if (!exif) return;
+
+    CFMutableDictionaryRef mut = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, exif);
+    if (!mut) return;
+
+    // ExposureTime als rational [num, den]
+    float expt = g_metaExposure;
+    if (expt <= 0.0001f) expt = 0.008333f;
+    int num = 1;
+    int den = (int)(1.0f / expt + 0.5f);
+    if (den < 1) den = 1;
+    CFNumberRef n1 = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &num);
+    CFNumberRef n2 = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &den);
+    if (n1 && n2) {
+        const void *rv[] = { n1, n2 };
+        CFArrayRef expArr = CFArrayCreate(kCFAllocatorDefault, rv, 2, &kCFTypeArrayCallBacks);
+        if (expArr) {
+            CFDictionarySetValue(mut, CFSTR("ExposureTime"), expArr);
+            CFRelease(expArr);
+        }
+    }
+    if (n1) CFRelease(n1);
+    if (n2) CFRelease(n2);
+
+    // ISOSpeedRatings als Array [iso]
+    int64_t iso = currentIsoValue(atomic_load(&g_videoLux));
+    CFNumberRef isoN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &iso);
+    if (isoN) {
+        const void *iv[] = { isoN };
+        CFArrayRef isoArr = CFArrayCreate(kCFAllocatorDefault, iv, 1, &kCFTypeArrayCallBacks);
+        if (isoArr) {
+            CFDictionarySetValue(mut, CFSTR("ISOSpeedRatings"), isoArr);
+            CFRelease(isoArr);
+        }
+        CFRelease(isoN);
+    }
+
+    CVBufferSetAttachment(px, CFSTR("{Exif}"), mut, kCVAttachmentMode_ShouldPropagate);
+    CFRelease(mut);
+    L("EXIF-Rewrite: expt=1/%d iso=%lld", den, (long long)iso);
+}
+
 static void hook_photoRender(id self, SEL _cmd, id sbuf, id input) {
+    rewritePhotoExif((__bridge CMSampleBufferRef)sbuf);
     orig_photoRender(self, _cmd, sbuf, input);
 }
 
