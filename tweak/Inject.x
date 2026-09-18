@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "exif-fix-3"
+#define VCAM_BUILD_ID "exif-fix-4"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1538,6 +1538,7 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
 // überschreiben wir ExposureTime (Dashboard expt=) und ISOSpeedRatings
 // (bildbasierte ISO) — so passt das EXIF zum Feed statt zum Sensor.
 // FNumber/FocalLength/LensModel bleiben (Geräte-Wahrheit, korrekt).
+static char g_photoExifKeys[1024] = {0};        // Attachment-Key-Liste (Diagnose)
 static _Atomic uint64_t g_photoExifCalls = 0;   // rewritePhotoExif aufgerufen
 static _Atomic uint64_t g_photoExifNoPx = 0;    // kein PixelBuffer
 static _Atomic uint64_t g_photoExifNoAtt = 0;   // kein {Exif}-Attachment
@@ -1552,16 +1553,28 @@ static void rewritePhotoExif(CMSampleBufferRef sb) {
     CFDictionaryRef exif = atts ? (CFDictionaryRef)CFDictionaryGetValue(atts, CFSTR("{Exif}")) : NULL;
     if (!exif) {
         atomic_fetch_add(&g_photoExifNoAtt, 1);
-        // Diagnose: welche Attachment-Keys sind da?
-        static int logged = 0;
-        if (atts && !logged) {
-            logged = 1;
+        // Diagnose: welche Attachment-Keys sind am Foto-Buffer? In den Status
+        // schreiben (os_log ist per SSH nicht lesbar).
+        if (atts) {
             CFIndex n = CFDictionaryGetCount(atts);
-            CFStringRef keys[16];
+            if (n > 24) n = 24;
+            CFStringRef keys[24];
             CFDictionaryGetKeysAndValues(atts, (const void **)keys, NULL);
-            for (CFIndex i = 0; i < n && i < 16; i++) {
-                L("EXIF-DIAG attachment[%d]=%@", (int)i, keys[i]);
+            char buf[1024] = {0};
+            size_t used = 0;
+            for (CFIndex i = 0; i < n; i++) {
+                const char *ks = CFStringGetCStringPtr(keys[i], kCFStringEncodingUTF8);
+                char tmp[128];
+                if (ks) snprintf(tmp, sizeof(tmp), "%s;", ks);
+                else {
+                    CFStringGetCString(keys[i], tmp, sizeof(tmp), kCFStringEncodingUTF8);
+                }
+                size_t l = strlen(tmp);
+                if (used + l + 1 < sizeof(buf)) { memcpy(buf + used, tmp, l); used += l; }
             }
+            snprintf(g_photoExifKeys, sizeof(g_photoExifKeys), "%s", buf);
+        } else {
+            snprintf(g_photoExifKeys, sizeof(g_photoExifKeys), "(keine Attachments)");
         }
         return;
     }
@@ -1838,6 +1851,10 @@ static void statusServerThread(void) {
         }
         if (atomic_load(&g_orientDumped_video)) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " %s\n", g_orientDump_video);
+            if (mw > 0) w += mw;
+        }
+        if (g_photoExifKeys[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, " photoAtts=%s\n", g_photoExifKeys);
             if (mw > 0) w += mw;
         }
         if (atomic_load(&g_fmtDumped)) {
