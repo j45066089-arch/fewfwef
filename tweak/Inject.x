@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "exif-fix-5"
+#define VCAM_BUILD_ID "faceprobe-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1550,6 +1550,7 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
 // (bildbasierte ISO) — so passt das EXIF zum Feed statt zum Sensor.
 // FNumber/FocalLength/LensModel bleiben (Geräte-Wahrheit, korrekt).
 static char g_photoExifKeys[1024] = {0};        // Attachment-Key-Liste (Diagnose)
+static char g_faceProbe[8192] = {0};            // faceprobe-Ergebnis (Status)
 static _Atomic uint64_t g_photoExifCalls = 0;   // rewritePhotoExif aufgerufen
 static _Atomic uint64_t g_photoExifNoPx = 0;    // kein PixelBuffer
 static _Atomic uint64_t g_photoExifNoAtt = 0;   // kein {Exif}-Attachment
@@ -1711,6 +1712,51 @@ static void statusServerThread(void) {
                     atomic_store(&g_metaOn, nr);
                     L("Metadata-Rewrite jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "faceprobe", 9) == 0) {
+                // FACE-PROBE: alle geladenen Klassen mit Face/Detector/Metadata im Namen
+                // + ihre relevanten Methoden — findet den Daemon-Face-Pfad (Astra-Punkt 1).
+                int fc = objc_getClassList(NULL, 0);
+                Class *all = malloc(sizeof(Class) * (fc > 0 ? fc : 1));
+                int n = objc_getClassList(all, fc);
+                int shown = 0;
+                for (int i = 0; i < n && shown < 40; i++) {
+                    const char *cn = class_getName(all[i]);
+                    if (!cn) continue;
+                    if (strcasestr(cn, "face") || strcasestr(cn, "detector") ||
+                        strcasestr(cn, "metadata")) {
+                        // Methoden mit face/detect auflisten
+                        char methods[512] = {0};
+                        size_t mu = 0;
+                        unsigned int mc = 0;
+                        Method *ms = class_copyMethodList(all[i], &mc);
+                        for (unsigned int j = 0; j < mc && mu < 450; j++) {
+                            const char *mn = sel_getName(method_getName(ms[j]));
+                            if (mn && (strcasestr(mn, "face") || strcasestr(mn, "detect") ||
+                                       strcasestr(mn, "metadata"))) {
+                                size_t l = strlen(mn);
+                                if (mu + l + 2 < sizeof(methods)) {
+                                    memcpy(methods + mu, mn, l);
+                                    mu += l;
+                                    methods[mu++] = ';';
+                                    methods[mu] = 0;
+                                }
+                            }
+                        }
+                        free(ms);
+                        size_t used = strlen(g_faceProbe);
+                        if (used + 600 < sizeof(g_faceProbe)) {
+                            snprintf(g_faceProbe + used, sizeof(g_faceProbe) - used,
+                                     "FACE %s :: %s\n", cn, methods[0] ? methods : "-");
+                        }
+                        shown++;
+                    }
+                }
+                free(all);
+                {
+                    size_t used = strlen(g_faceProbe);
+                    snprintf(g_faceProbe + used, sizeof(g_faceProbe) - used,
+                             "FACE-PROBE fertig (%d Klassen gescannt, %d relevant)\n", n, shown);
+                }
             } else if (strncmp(cmd, "portrait=", 9) == 0) {
                 int nr = atoi(cmd + 9);
                 if (nr >= 0 && nr <= 1) {
@@ -1866,6 +1912,10 @@ static void statusServerThread(void) {
         }
         if (g_photoExifKeys[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " photoAtts=%s\n", g_photoExifKeys);
+            if (mw > 0) w += mw;
+        }
+        if (g_faceProbe[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "FACE-PROBE:\n%s", g_faceProbe);
             if (mw > 0) w += mw;
         }
         if (atomic_load(&g_fmtDumped)) {
