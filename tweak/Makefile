@@ -17,8 +17,8 @@ TWEAK_NAME := VCamInject
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamInject_LDFLAGS := -Wl,-u,_VCamInject_start -Wl,-exported_symbol,_VCamInject_start
+# notify.h liegt in libsystem_notify (Teil von libSystem, kein explizites Linken)
 VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox Accelerate IOSurface
-VCamInject_LIBRARIES := notify
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
