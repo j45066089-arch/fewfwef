@@ -17,6 +17,7 @@
 #import <string.h>
 #import <stdlib.h>
 #import <dlfcn.h>
+#import <execinfo.h>
 
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
 
@@ -173,6 +174,103 @@ static void hook_observeValue(id self, SEL _cmd, NSString *keyPath, id object,
     orig_observeValue(self, _cmd, keyPath, object, change, context);
 }
 
+// ---- CCCameraController-Wrapper-Hooks (Astra: erster Test) -----------------
+static _Atomic uint64_t g_cccISOCalls = 0;
+static _Atomic uint64_t g_cccMinCalls = 0;
+static _Atomic uint64_t g_cccMaxCalls = 0;
+static _Atomic uint64_t g_cccSetCalls = 0;
+static _Atomic int g_cccHooked = 0;
+
+// generischer Observe-Logger: ruft original, loggt Call + Wert + Backtrace
+static void logCCC(const char *sel, id obj, const char *type, uint64_t n) {
+    if ((n & 0x3ff) == 1 || n <= 3) {   // erste 3 + alle 1024
+        void *frames[16];
+        int cnt = backtrace(frames, 16);
+        char **syms = backtrace_symbols(frames, cnt);
+        NSMutableString *bt = [NSMutableString string];
+        for (int i = 2; i < cnt && i < 7; i++) {
+            [bt appendFormat:@"  #%d %s\n", i - 2, syms[i] ?: "?"];
+        }
+        free(syms);
+        APILOG("CCCameraController %s call #%llu obj=%s class=%s super=%s type=%s\n%s",
+               sel, (unsigned long long)n,
+               [obj description].UTF8String ?: "?",
+               object_getClassName(obj) ?: "?",
+               class_getName(class_getSuperclass(object_getClass(obj))) ?: "?",
+               type, bt.UTF8String ?: "?");
+    }
+}
+
+// float-Getter-Hooks (ISO/minISO/maxISO)
+static float (*orig_ccc_ISOFunc)(id, SEL);
+static float hook_ccc_ISO(id self, SEL _cmd) {
+    atomic_fetch_add(&g_cccISOCalls, 1);
+    logCCC("ISO", self, "f", atomic_load(&g_cccISOCalls));
+    return orig_ccc_ISOFunc(self, _cmd);
+}
+static float (*orig_ccc_MinFunc)(id, SEL);
+static float hook_ccc_MinISO(id self, SEL _cmd) {
+    atomic_fetch_add(&g_cccMinCalls, 1);
+    logCCC("minISO", self, "f", atomic_load(&g_cccMinCalls));
+    return orig_ccc_MinFunc(self, _cmd);
+}
+static float (*orig_ccc_MaxFunc)(id, SEL);
+static float hook_ccc_MaxISO(id self, SEL _cmd) {
+    atomic_fetch_add(&g_cccMaxCalls, 1);
+    logCCC("maxISO", self, "f", atomic_load(&g_cccMaxCalls));
+    return orig_ccc_MaxFunc(self, _cmd);
+}
+// setISO: — void-return
+static void (*orig_ccc_SetFunc)(id, SEL, float);
+static void hook_ccc_SetISO(id self, SEL _cmd, float iso) {
+    atomic_fetch_add(&g_cccSetCalls, 1);
+    APILOG("CCCameraController setISO: %.1f call #%llu\n", iso,
+           (unsigned long long)atomic_load(&g_cccSetCalls));
+    orig_ccc_SetFunc(self, _cmd, iso);
+}
+
+static void installCCCHooks(Class cls) {
+    // Methodeninventar (ISO/Exposure/Sample/Metadata/Frame) — Astra Schritt B
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    APILOG("CCCameraController Methodeninventar (%u Methoden):\n", count);
+    for (unsigned int i = 0; i < count; i++) {
+        const char *nm = sel_getName(method_getName(methods[i]));
+        if (strstr(nm, "ISO") || strstr(nm, "Exposure") || strstr(nm, "Sample") ||
+            strstr(nm, "Metadata") || strstr(nm, "Frame") || strstr(nm, "iso")) {
+            char type[64];
+            method_getTypeEncoding(methods[i], type, sizeof(type));
+            APILOG("  %s :: %s\n", nm, type);
+        }
+    }
+    free(methods);
+    Method m;
+    m = class_getInstanceMethod(cls, sel_registerName("ISO"));
+    if (m && !orig_ccc_ISOFunc) {
+        orig_ccc_ISOFunc = (float (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_ccc_ISO);
+        APILOG("Hook installiert: CCCameraController ISO\n");
+    }
+    m = class_getInstanceMethod(cls, sel_registerName("minISO"));
+    if (m && !orig_ccc_MinFunc) {
+        orig_ccc_MinFunc = (float (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_ccc_MinISO);
+        APILOG("Hook installiert: CCCameraController minISO\n");
+    }
+    m = class_getInstanceMethod(cls, sel_registerName("maxISO"));
+    if (m && !orig_ccc_MaxFunc) {
+        orig_ccc_MaxFunc = (float (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_ccc_MaxISO);
+        APILOG("Hook installiert: CCCameraController maxISO\n");
+    }
+    m = class_getInstanceMethod(cls, sel_registerName("setISO:"));
+    if (m && !orig_ccc_SetFunc) {
+        orig_ccc_SetFunc = (void (*)(id, SEL, float))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_ccc_SetISO);
+        APILOG("Hook installiert: CCCameraController setISO:\n");
+    }
+}
+
 static _Atomic int g_installed = 0;
 
 static void installHooks(void) {
@@ -209,7 +307,32 @@ static void installHooks(void) {
         }
     }
 
-    // 3) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
+    // 3) CCCameraController-Wrapper (Astra: der wahrscheinlichste ISO-Pfad).
+    // CCMedia.framework ist App-gebündelt -> über Bundle-Pfad laden, sonst
+    // findet NSClassFromString die Klasse nicht (dyld lädt evtl. lazy).
+    {
+        NSString *ccPath = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"Frameworks/CCMedia.framework/CCMedia"];
+        dlopen([ccPath UTF8String], RTLD_NOW);
+        NSString *uiPath = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"Frameworks/CameraUI.framework/CameraUI"];
+        dlopen([uiPath UTF8String], RTLD_NOW);
+        APILOG("CCMedia/CameraUI dlopen versucht (%s)\n",
+               access([ccPath UTF8String], F_OK) == 0 ? "CCMedia da" : "CCMedia fehlt");
+    }
+    {
+        Class cc = NSClassFromString(@"CCCameraController");
+        if (!cc) cc = objc_getClass("CCCameraController");
+        if (cc) {
+            APILOG("CCCameraController gefunden: %s (super=%s)\n",
+                   class_getName(cc), class_getName(class_getSuperclass(cc)));
+            installCCCHooks(cc);
+        } else {
+            APILOG("CCCameraController NICHT gefunden — läuft sie in einem anderen Image?\n");
+        }
+    }
+
+    // 4) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
     Class nc = NSClassFromString(@"NSNotificationCenter");
     if (!nc) nc = objc_getClass("NSNotificationCenter");
     if (nc) {
