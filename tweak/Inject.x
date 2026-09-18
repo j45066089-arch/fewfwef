@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "device-iso-1"
+#define VCAM_BUILD_ID "notify-iso-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -35,6 +35,8 @@
 #import <stdarg.h>
 #import <stdlib.h>
 #import <string.h>
+#import <notify.h>
+#import <mach/mach_time.h>
 
 #define WS_PORT 8767
 #define STATUS_PORT 8769
@@ -103,9 +105,10 @@ static _Atomic int64_t g_metaIso = 0;     // "iso=" (0 = auto aus LuxLevel)
 // AVCaptureDevice.ISO-Getter-Hook in App-Prozessen liest sie (statt des Sensors).
 // Gleiche UID (mobile) in allen Prozessen -> /tmp ist lesbar.
 static _Atomic int64_t g_curIso = 0;     // letzte berechnete ISO (mediaserverd)
-#define VCAM_ISO_PATH "/var/tmp/nikecam_iso.txt"
-static void writeIsoFile(int64_t iso);      // fwd (Definition unten, vor Hook-Abschnitt)
-static int64_t readIsoFile(void);
+// NOTIFY-IPC (Astra): kein gemeinsamer Dateipfad nötig — notifyd hält den
+// 64-Bit-State systemweit. Sandbox-proof (Datei-/var/tmp-View ist pro Prozess).
+static void publishISO(uint32_t iso);   // fwd (Definition unten, notify-Sektion)
+static void startIsoListener(void);
 static char g_procName[64] = {0};         // Host-Prozessname (iOS 18: welcher Capture-Daemon)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
@@ -274,7 +277,7 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
             if (iso > 3200) iso = 3200;
             if (atomic_load(&g_curIso) != iso) {
                 atomic_store(&g_curIso, iso);
-                writeIsoFile(iso);
+                publishISO((uint32_t)iso);
             }
         }
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
@@ -1213,33 +1216,80 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 }
 
 // ----------------------------------------------------------------
-// DEVICE-ISO-FIX: bildbasierte ISO an Apps durchreichen.
-// mediaserverd berechnet die ISO aus der Feed-Helligkeit (mdon-Pfad) und
-// schreibt sie in VCAM_ISO_PATH. Der AVCaptureDevice.ISO-Getter-Hook in
-// App-Prozessen liest diese Datei und gibt den Wert statt der echten
-// Sensor-ISO zurück — so sehen ProCamera & Co. eine zum Feed passende ISO.
-static void writeIsoFile(int64_t iso) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%lld\n", (long long)iso);
-    int fd = open(VCAM_ISO_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { write(fd, buf, n); close(fd); }
+// DEVICE-ISO-FIX v3 (notify-IPC, Astra-Empfehlung):
+// mediaserverd publiziert die bildbasierte ISO als 64-Bit-State über
+// Darwin Notifications (notify_set_state + notify_post). App-Prozesse
+// registrieren einen Listener (notify_register_dispatch) und pflegen
+// einen atomaren Cache; der AVCaptureDevice.ISO-Getter liest NUR den
+// Cache (nie IPC im Getter). Kein gemeinsamer Dateipfad nötig —
+// umgeht die mediaserverd-Sandbox (Datei-Experiment schlug fehl).
+#define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
+
+static uint64_t monoNs(void) {
+    static mach_timebase_info_data_t tb = {0};
+    if (tb.denom == 0) mach_timebase_info(&tb);
+    return mach_absolute_time() * tb.numer / tb.denom;
 }
 
-static int64_t readIsoFile(void) {
-    char buf[32] = {0};
-    int fd = open(VCAM_ISO_PATH, O_RDONLY);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    return (int64_t)atoll(buf);
+static uint64_t packIsoState(uint32_t iso, uint32_t seq) {
+    return ((uint64_t)seq << 32) | (uint64_t)iso;
+}
+static uint32_t unpackIsoValue(uint64_t raw) {
+    return (uint32_t)(raw & 0xffffffffu);
 }
 
-// Hook: -[AVCaptureDevice ISO] -> bildbasierter Wert (falls Datei vorhanden).
+// ---- Daemon-Seite (mediaserverd): Wert publizieren ---------------------
+static int g_isoTokenDaemon = -1;
+static _Atomic uint32_t g_isoSeq = 0;
+
+static void publishISO(uint32_t iso) {
+    if (g_isoTokenDaemon < 0) {
+        uint32_t r = notify_register_check(VCAM_ISO_NOTIFY, &g_isoTokenDaemon);
+        if (r != NOTIFY_STATUS_OK) { g_isoTokenDaemon = -1; return; }
+    }
+    if (iso < 25) iso = 25;
+    if (iso > 3200) iso = 3200;
+    uint32_t seq = atomic_fetch_add(&g_isoSeq, 1) + 1;
+    uint64_t state = packIsoState(iso, seq);
+    notify_set_state(g_isoTokenDaemon, state);   // ERST State, DANN Signal
+    notify_post(VCAM_ISO_NOTIFY);
+}
+
+// ---- App-Seite: atomarer Cache + Listener ------------------------------
+static int g_isoTokenApp = -1;
+static _Atomic uint32_t g_isoCacheValue = 0;
+static _Atomic uint32_t g_isoCacheSeq = 0;
+static _Atomic uint64_t g_isoCacheAtNs = 0;
+
+static void refreshIsoCache(void) {
+    if (g_isoTokenApp < 0) return;
+    uint64_t raw = 0;
+    if (notify_get_state(g_isoTokenApp, &raw) != NOTIFY_STATUS_OK) return;
+    uint32_t iso = unpackIsoValue(raw);
+    uint32_t seq = (uint32_t)(raw >> 32);
+    if (iso < 25 || iso > 3200) return;
+    atomic_store(&g_isoCacheValue, iso);
+    atomic_store(&g_isoCacheSeq, seq);
+    atomic_store(&g_isoCacheAtNs, monoNs());
+}
+
+static void startIsoListener(void) {
+    if (g_isoTokenApp >= 0) return;
+    uint32_t r = notify_register_dispatch(VCAM_ISO_NOTIFY, &g_isoTokenApp,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+        ^(int token) { refreshIsoCache(); });
+    if (r != NOTIFY_STATUS_OK) { g_isoTokenApp = -1; return; }
+    refreshIsoCache();   // State kann vor Registrierung gesetzt worden sein
+}
+
+// Hook: -[AVCaptureDevice ISO] -> atomarer Cache, kein IPC im Getter.
 static float (*orig_AVCaptureDevice_ISO)(id self, SEL _cmd);
 static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
-    int64_t iso = readIsoFile();
-    if (iso > 0) {
+    uint32_t iso = atomic_load(&g_isoCacheValue);
+    uint32_t seq = atomic_load(&g_isoCacheSeq);
+    uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
+    // gültig: plausibler Wert, Sequenz > 0, nicht älter als 3s
+    if (iso >= 25 && iso <= 3200 && seq != 0 && age < 3000000000ULL) {
         // kleine realistische Streuung, damit die ISO nicht konstant wirkt
         static unsigned int seed = 0x9e3779b9u;
         int64_t jitter = (int64_t)((rand_r(&seed) % 9) - 4); // ±4
@@ -2197,17 +2247,20 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
 // aufrufen kann. Idempotent (Guard), damit doppelter Aufruf (ctor + manuell) safe ist.
 static _Atomic int g_started = 0;
 
-// DEVICE-ISO-FIX: In JEDEM Prozess (App ODER Daemon) den AVCaptureDevice.ISO-
-// Getter hooken. App-Prozesse (ProCamera & Co.) lesen die bildbasierte ISO aus
-// VCAM_ISO_PATH; Capture-Daemons (mediaserverd) hooken hier nur den Getter,
-// die echte SWAP-Logik installiert erst weiter unten.
+// DEVICE-ISO-FIX v3: In JEDEM Prozess (App ODER Daemon):
+// 1) notify-Listener starten (pflegt g_isoCache* — im Daemon harmlos/nutzlos,
+//    in Apps liefert er den Wert für den Getter-Hook).
+// 2) AVCaptureDevice.ISO-Getter hooken, falls die Klasse existiert.
+// Capture-Daemons (mediaserverd) publizieren zusätzlich über publishISO()
+// im Decoder-Pfad; die echte SWAP-Logik installiert erst weiter unten.
 static void installDeviceIsoHook(void) {
+    startIsoListener();
     Class avDev = NSClassFromString(@"AVCaptureDevice");
     if (!avDev) avDev = objc_getClass("AVCaptureDevice");
     if (avDev && !orig_AVCaptureDevice_ISO) {
         MSHookMessageEx(avDev, sel_registerName("ISO"),
                         (IMP)hook_AVCaptureDevice_ISO, (IMP*)&orig_AVCaptureDevice_ISO);
-        FLOG("Hook: AVCaptureDevice ISO (device-iso-fix)\n");
+        FLOG("Hook: AVCaptureDevice ISO (notify-iso)\n");
     }
 }
 
