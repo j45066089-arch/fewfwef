@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "antiflicker-atomic-1"
+#define VCAM_BUILD_ID "device-iso-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -33,6 +33,8 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <stdarg.h>
+#import <stdlib.h>
+#import <string.h>
 
 #define WS_PORT 8767
 #define STATUS_PORT 8769
@@ -97,6 +99,13 @@ static _Atomic int64_t g_videoLux = 0;    // daraus abgeleitetes LuxLevel
 static float g_metaExposure = 0.008333f;  // "expt=" Belichtungszeit (Sekunden)
 static float g_metaSnr = 24.0f;           // "snr=" Rauschmaß (dB-artig)
 static _Atomic int64_t g_metaIso = 0;     // "iso=" (0 = auto aus LuxLevel)
+// DEVICE-ISO-FIX: mediaserverd schreibt die bildbasierte ISO hierher; der
+// AVCaptureDevice.ISO-Getter-Hook in App-Prozessen liest sie (statt des Sensors).
+// Gleiche UID (mobile) in allen Prozessen -> /tmp ist lesbar.
+static _Atomic int64_t g_curIso = 0;     // letzte berechnete ISO (mediaserverd)
+#define VCAM_ISO_PATH "/var/tmp/nikecam_iso.txt"
+static void writeIsoFile(int64_t iso);      // fwd (Definition unten, vor Hook-Abschnitt)
+static int64_t readIsoFile(void);
 static char g_procName[64] = {0};         // Host-Prozessname (iOS 18: welcher Capture-Daemon)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
@@ -1065,6 +1074,11 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                         : (int64_t)(120000.0 / (double)(lux + 1));
             if (iso < 50) iso = 50;
             if (iso > 3200) iso = 3200;
+            // DEVICE-ISO-FIX: berechnete ISO an App-Prozesse durchreichen.
+            if (atomic_load(&g_curIso) != iso) {
+                atomic_store(&g_curIso, iso);
+                writeIsoFile(iso);
+            }
             CFNumberRef exptN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &expt);
             CFNumberRef luxN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &lux);
             CFNumberRef isoN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &iso);
@@ -1189,6 +1203,45 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
         }
     }
     pthread_mutex_unlock(&g_objMutex);
+}
+
+// ----------------------------------------------------------------
+// DEVICE-ISO-FIX: bildbasierte ISO an Apps durchreichen.
+// mediaserverd berechnet die ISO aus der Feed-Helligkeit (mdon-Pfad) und
+// schreibt sie in VCAM_ISO_PATH. Der AVCaptureDevice.ISO-Getter-Hook in
+// App-Prozessen liest diese Datei und gibt den Wert statt der echten
+// Sensor-ISO zurück — so sehen ProCamera & Co. eine zum Feed passende ISO.
+static void writeIsoFile(int64_t iso) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld\n", (long long)iso);
+    int fd = open(VCAM_ISO_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) { write(fd, buf, n); close(fd); }
+}
+
+static int64_t readIsoFile(void) {
+    char buf[32] = {0};
+    int fd = open(VCAM_ISO_PATH, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    return (int64_t)atoll(buf);
+}
+
+// Hook: -[AVCaptureDevice ISO] -> bildbasierter Wert (falls Datei vorhanden).
+static float (*orig_AVCaptureDevice_ISO)(id self, SEL _cmd);
+static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
+    int64_t iso = readIsoFile();
+    if (iso > 0) {
+        // kleine realistische Streuung, damit die ISO nicht konstant wirkt
+        static unsigned int seed = 0x9e3779b9u;
+        int64_t jitter = (int64_t)((rand_r(&seed) % 9) - 4); // ±4
+        float v = (float)(iso + jitter);
+        if (v < 40.0f) v = 40.0f;
+        if (v > 6400.0f) v = 6400.0f;
+        return v;
+    }
+    return orig_AVCaptureDevice_ISO(self, _cmd);
 }
 
 // ----------------------------------------------------------------
@@ -2137,10 +2190,27 @@ static void hook_stRender(id self, SEL _cmd, id sampleBuffer, id input) {
 // aufrufen kann. Idempotent (Guard), damit doppelter Aufruf (ctor + manuell) safe ist.
 static _Atomic int g_started = 0;
 
+// DEVICE-ISO-FIX: In JEDEM Prozess (App ODER Daemon) den AVCaptureDevice.ISO-
+// Getter hooken. App-Prozesse (ProCamera & Co.) lesen die bildbasierte ISO aus
+// VCAM_ISO_PATH; Capture-Daemons (mediaserverd) hooken hier nur den Getter,
+// die echte SWAP-Logik installiert erst weiter unten.
+static void installDeviceIsoHook(void) {
+    Class avDev = NSClassFromString(@"AVCaptureDevice");
+    if (!avDev) avDev = objc_getClass("AVCaptureDevice");
+    if (avDev && !orig_AVCaptureDevice_ISO) {
+        MSHookMessageEx(avDev, sel_registerName("ISO"),
+                        (IMP)hook_AVCaptureDevice_ISO, (IMP*)&orig_AVCaptureDevice_ISO);
+        FLOG("Hook: AVCaptureDevice ISO (device-iso-fix)\n");
+    }
+}
+
 __attribute__((visibility("default")))
 void VCamInject_start(void) {
     if (atomic_exchange(&g_started, 1)) return;   // idempotent
     NSString *proc = [[NSProcessInfo processInfo] processName];
+    // DEVICE-ISO-FIX: ISO-Getter-Hook in JEDEM Prozess installieren, BEVOR der
+    // captureProcs-Check unten App-Prozesse früh abbrechen lässt.
+    installDeviceIsoHook();
     L("injiziert in %@ (pid=%d)", proc, getpid());
     FLOG("start: proc=%s pid=%d build=%s\n", [proc UTF8String] ?: "?", getpid(), VCAM_BUILD_ID);
     // iOS 16: mediaserverd ist der Capture-Server.

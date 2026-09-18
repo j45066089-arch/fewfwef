@@ -16,6 +16,10 @@
 			<string>avconferenced</string>
 			<string>cameracaptured</string>
 		</array>
+		<key>Classes</key>
+		<array>
+			<string>AVCaptureDevice</string>
+		</array>
 	</dict>
 </dict>
 </plist>
