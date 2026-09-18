@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "notify-iso-1"
+#define VCAM_BUILD_ID "notify-iso-2"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -275,10 +275,8 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
             int64_t iso = isoCfg > 0 ? isoCfg : (int64_t)(120000.0 / (double)(lux + 1));
             if (iso < 50) iso = 50;
             if (iso > 3200) iso = 3200;
-            if (atomic_load(&g_curIso) != iso) {
-                atomic_store(&g_curIso, iso);
-                publishISO((uint32_t)iso);
-            }
+            if (atomic_load(&g_curIso) != iso) atomic_store(&g_curIso, iso);
+            publishISO((uint32_t)iso);   // Throttle + Keep-Alive intern
         }
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
     }
@@ -1242,7 +1240,20 @@ static uint32_t unpackIsoValue(uint64_t raw) {
 static int g_isoTokenDaemon = -1;
 static _Atomic uint32_t g_isoSeq = 0;
 
+static _Atomic uint64_t g_isoLastPublishNs = 0;
+static _Atomic uint32_t g_isoLastPublished = 0;
+
 static void publishISO(uint32_t iso) {
+    // THROTTLE (Bug 2): notify_post ist ein Mach-IPC an notifyd — pro Frame
+    // (30/s) verursachte das Ruckeln im Capture-Pfad. Nur publizieren bei
+    // >=2 ISO-Stufen Änderung ODER wenn >500ms seit letztem Publish.
+    uint64_t now = monoNs();
+    uint64_t last = atomic_load(&g_isoLastPublishNs);
+    uint32_t lastIso = atomic_load(&g_isoLastPublished);
+    int64_t diff = (int64_t)iso - (int64_t)lastIso;
+    if (diff < 0) diff = -diff;
+    if (diff < 2 && last != 0 && (now - last) < 500000000ULL) return;
+
     if (g_isoTokenDaemon < 0) {
         uint32_t r = notify_register_check(VCAM_ISO_NOTIFY, &g_isoTokenDaemon);
         if (r != NOTIFY_STATUS_OK) { g_isoTokenDaemon = -1; return; }
@@ -1253,6 +1264,8 @@ static void publishISO(uint32_t iso) {
     uint64_t state = packIsoState(iso, seq);
     notify_set_state(g_isoTokenDaemon, state);   // ERST State, DANN Signal
     notify_post(VCAM_ISO_NOTIFY);
+    atomic_store(&g_isoLastPublishNs, now);
+    atomic_store(&g_isoLastPublished, iso);
 }
 
 // ---- App-Seite: atomarer Cache + Listener ------------------------------
@@ -2255,12 +2268,24 @@ static _Atomic int g_started = 0;
 // im Decoder-Pfad; die echte SWAP-Logik installiert erst weiter unten.
 static void installDeviceIsoHook(void) {
     startIsoListener();
+    // AVFoundation ggf. erst laden, sonst ist AVCaptureDevice beim ctor-Zeitpunkt
+    // (dyld-Image-Load, vor App-main) noch nicht registriert -> Hook verpasst.
+    dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
     Class avDev = NSClassFromString(@"AVCaptureDevice");
     if (!avDev) avDev = objc_getClass("AVCaptureDevice");
     if (avDev && !orig_AVCaptureDevice_ISO) {
-        MSHookMessageEx(avDev, sel_registerName("ISO"),
-                        (IMP)hook_AVCaptureDevice_ISO, (IMP*)&orig_AVCaptureDevice_ISO);
-        FLOG("Hook: AVCaptureDevice ISO (notify-iso)\n");
+        // FIX (float-ABI): -[AVCaptureDevice ISO] gibt FLOAT zurück. MSHookMessageEx
+        // propagiert auf arm64 nur x0 (Pointer-Return) — der float in s0 ging
+        // verloren und der Hook war wirkungslos. Deshalb method_setImplementation
+        // mit korrekter C-Signatur (float (*)(id, SEL)).
+        Method mISO = class_getInstanceMethod(avDev, sel_registerName("ISO"));
+        if (mISO) {
+            orig_AVCaptureDevice_ISO = (float (*)(id, SEL))method_getImplementation(mISO);
+            method_setImplementation(mISO, (IMP)hook_AVCaptureDevice_ISO);
+            FLOG("Hook: AVCaptureDevice ISO via method_setImplementation (float)\n");
+        } else {
+            FLOG("Hook: AVCaptureDevice ISO-Methode nicht gefunden\n");
+        }
     }
 }
 
