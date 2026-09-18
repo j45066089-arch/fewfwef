@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ios18-start-1"
+#define VCAM_BUILD_ID "portrait-fix-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -90,6 +90,7 @@ static _Atomic int g_replacementEnabled = 1;
 static _Atomic int g_useCountDelay = 1;   // "urel=N": 1=66ms-Verzögerung, 0=sofort
 static _Atomic int g_diag = 1;            // "diag=N": 0 = Tracking/Logging pro Frame aus
 // VIDEO-DRIVEN METADATA (Schritt 1: Frame-Metadaten-Konsistenz für KYC-Checks)
+static _Atomic int g_portraitSwap = 0;   // "portrait=N": Hochformat-Buffer swappen (0=aus)
 static _Atomic int g_metaOn = 1;          // "mdon=N": MetadataDictionary-Umschreiben
 static _Atomic int64_t g_videoLuma = 0;   // mittlere Luminanz des OBS-Frames (0-255)
 static _Atomic int64_t g_videoLux = 0;    // daraus abgeleitetes LuxLevel
@@ -665,14 +666,14 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     size_t sh = CVPixelBufferGetHeight(src);
     OSType sfmt = CVPixelBufferGetPixelFormatType(src);
 
-    // PREVIEW-FIX (LordVCAM-Stil): Porträt-Buffer (h>w) nicht direkt swappen —
-    // sie sind Post-Rotations-Ableitungen (750x1334 Preview, 750x1000 Photo-
-    // Thumbnails) des geswappten Sensor-Feeds (1440x1080). Das Rotations-Node
-    // im Capture-Graph erzeugt sie korrekt aus unseren Pixeln; ein direkter
-    // Swap hier presst das 16:9-Quellbild in ein Hochformat-Sliver (kaputte
-    // Preview). LordVCAM rotiert hier ebenfalls nicht (needsCCW90=false für
-    // h>w) — der Graph übernimmt die Orientierung.
-    if (dh > dw) {
+    // PORTRAIT-FIX: Hochformat-Ziele (h>w) NICHT blind überspringen. Manche Apps
+    // rendern ihre Live-Preview direkt aus einem Hochformat-Buffer (750x1334),
+    // der NICHT aus dem geswappten Sensor-Feed abgeleitet wird — dann zeigt die
+    // App den Feed falsch (verschoben/ungeschnitten). Für solche Buffer leiten
+    // wir in den Rotate+Scale-Pfad unten um (Feed 16:9 -> 90° rotiert + scaled).
+    // Der bisherige Guard war zu aggressiv: er traf auch den aktiven Preview-Sink.
+    // KONTROLLIERT über Port 8769 "portrait=N": 0=überspringen (alt), 1=swappen (neu).
+    if (dh > dw && !atomic_load(&g_portraitSwap)) {
         atomic_fetch_add(&g_skipPortrait, 1);
         CVPixelBufferRelease(src);
         return NO;
@@ -878,6 +879,9 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             if (rotDeg == 0 && !dstIs420v) {
                 double dstAspect = (double)dw / (double)dh;
                 if (dstAspect > 1.5 && dw >= dh) rotDeg = 90;
+                // PORTRAIT-FIX: Hochformat-Ziel (h>w) -> Querformat-Feed 90° drehen,
+                // damit es sauber ins 9:16 rotiert+skaliert wird (statt verzerrt).
+                else if (atomic_load(&g_portraitSwap) && dh > dw) rotDeg = 90;
             }
             // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
             // WICHTIG: p420 (0x70343230) ist NICHT Video-Range — es ist Apples
@@ -1375,6 +1379,12 @@ static void statusServerThread(void) {
                     atomic_store(&g_metaOn, nr);
                     L("Metadata-Rewrite jetzt %d", nr);
                 }
+            } else if (strncmp(cmd, "portrait=", 9) == 0) {
+                int nr = atoi(cmd + 9);
+                if (nr >= 0 && nr <= 1) {
+                    atomic_store(&g_portraitSwap, nr);
+                    L("Portrait-Swap jetzt %d", nr);
+                }
             } else if (strncmp(cmd, "expt=", 5) == 0) {
                 float f = strtof(cmd + 5, NULL);
                 if (f > 0.0001f && f <= 1.0f) {
@@ -1404,7 +1414,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1448,6 +1458,7 @@ static void statusServerThread(void) {
             (int)atomic_load(&g_useCountDelay),
             (int)atomic_load(&g_diag),
             (int)atomic_load(&g_metaOn),
+            (int)atomic_load(&g_portraitSwap),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
@@ -1754,6 +1765,9 @@ static void wsClientThread(void) {
                         } else if ([cmd hasPrefix:@"mdon="]) {
                             int nm = [[cmd substringFromIndex:5] intValue];
                             if (nm >= 0 && nm <= 1) { atomic_store(&g_metaOn, nm); L("WS: MDON %d", nm); }
+                        } else if ([cmd hasPrefix:@"portrait="]) {
+                            int np = [[cmd substringFromIndex:9] intValue];
+                            if (np >= 0 && np <= 1) { atomic_store(&g_portraitSwap, np); L("WS: PORTRAIT %d", np); }
                         } else if ([cmd isEqualToString:@"status?"]) {
                             // Kompakten Status als maskierten WS-Text-Frame zuruecksenden
                             char sb[512];
