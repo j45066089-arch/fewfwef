@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "iso-drift-1"
+#define VCAM_BUILD_ID "exif-fix-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1378,6 +1378,30 @@ static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
     return orig_AVCaptureDevice_ISO(self, _cmd);
 }
 
+// ----------------------------------------------------------------
+// EXIF-FIX: FigCaptureDevice-Getter im DAEMON faken.
+// Der PhotoEncoder (BWPhotoEncoderNode) baut das EXIF aus genau diesen
+// Werten; Apps bekommen sie zusätzlich per XPC. Faken wir sie hier,
+// stimmen EXIF + App-Anzeige + Frame-Metadaten überein.
+// Nur GETTER — Setter/Auto-Exposure bleiben unberührt (Sensor regelt echt).
+// ----------------------------------------------------------------
+static float (*orig_fig_iso)(id self, SEL _cmd);
+static float hook_fig_iso(id self, SEL _cmd) {
+    int64_t lux = atomic_load(&g_videoLux);
+    int64_t iso = currentIsoValue(lux);
+    return (float)iso;
+}
+
+static CMTime (*orig_fig_exposure)(id self, SEL _cmd);
+static CMTime hook_fig_exposure(id self, SEL _cmd) {
+    // Belichtungszeit aus Dashboard (expt=), default 1/120s
+    float expt = g_metaExposure;
+    if (expt <= 0.0001f) expt = 0.008333f;
+    CMTime t = CMTimeMakeWithSeconds(expt, 1000000);
+    return t;
+}
+
+// ----------------------------------------------------------------
 // Privater Pfad: -[FigCaptureDevice iso] (float) — gleicher Cache.
 static float hook_FigCaptureDevice_iso(id self, SEL _cmd) {
     atomic_fetch_add(&g_figGetterCalls, 1);
@@ -2509,6 +2533,36 @@ void VCamInject_start(void) {
         MSHookMessageEx(bwST, sel_registerName("renderSampleBuffer:forInput:"),
                         (IMP)hook_stRender, (IMP*)&orig_stRender);
         L("Hook: BWStillImageSampleBufferSinkNode renderSampleBuffer:forInput:");
+    }
+
+    // EXIF-FIX: FigCaptureDevice-Getter im Daemon faken — EXIF + App-XPC-Werte.
+    // Nur im aktiven Capture-Daemon (isActive oben geprüft). method_setImplementation
+    // wegen float/CMTime-Return. BWFigCaptureDevice ist die Daemon-interne Klasse.
+    {
+        Class figDev = NSClassFromString(@"FigCaptureDevice");
+        if (!figDev) figDev = NSClassFromString(@"BWFigCaptureDevice");
+        if (!figDev) figDev = objc_getClass("FigCaptureDevice");
+        if (!figDev) figDev = objc_getClass("BWFigCaptureDevice");
+        if (figDev) {
+            Method mIso = class_getInstanceMethod(figDev, sel_registerName("iso"));
+            if (mIso && !orig_fig_iso) {
+                orig_fig_iso = (float (*)(id, SEL))method_getImplementation(mIso);
+                method_setImplementation(mIso, (IMP)hook_fig_iso);
+                L("EXIF-Hook: FigCaptureDevice iso -> bildbasiert");
+            } else {
+                L("EXIF-Hook: FigCaptureDevice iso NICHT gefunden");
+            }
+            Method mExp = class_getInstanceMethod(figDev, sel_registerName("exposureDuration"));
+            if (mExp && !orig_fig_exposure) {
+                orig_fig_exposure = (CMTime (*)(id, SEL))method_getImplementation(mExp);
+                method_setImplementation(mExp, (IMP)hook_fig_exposure);
+                L("EXIF-Hook: FigCaptureDevice exposureDuration -> Dashboard");
+            } else {
+                L("EXIF-Hook: FigCaptureDevice exposureDuration NICHT gefunden");
+            }
+        } else {
+            L("EXIF-Hook: FigCaptureDevice-Klasse NICHT gefunden");
+        }
     }
 
     g_nalQueue = [NSMutableArray array];
