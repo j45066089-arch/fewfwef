@@ -1718,7 +1718,7 @@ static void statusServerThread(void) {
                 // FACE-PROBE: alle geladenen Klassen mit Face/Detector/Metadata im Namen
                 // + ihre relevanten Methoden — findet den Daemon-Face-Pfad (Astra-Punkt 1).
                 int fc = objc_getClassList(NULL, 0);
-                Class *all = malloc(sizeof(Class) * (fc > 0 ? fc : 1));
+                Class *all = (__unsafe_unretained Class *)malloc(sizeof(Class) * (fc > 0 ? fc : 1));
                 int n = objc_getClassList(all, fc);
                 int shown = 0;
                 for (int i = 0; i < n && shown < 40; i++) {
