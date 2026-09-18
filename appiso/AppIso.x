@@ -21,6 +21,7 @@
 
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
 #define VCAM_EXPT_NOTIFY "com.nikeboy.vcam.expt"
+#define VCAM_FACEPATH_NOTIFY "com.nikeboy.vcam.facepath"   // App -> Daemon: 1=Hardware-Face-Detector, 2=Vision
 
 static void APILOG(const char *fmt, ...) {
     char buf[1024];
@@ -331,6 +332,34 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
     orig_capturePhotoCompletion(self, _cmd, settings, delegate, handler);
 }
 
+// ---- FACE-PFAD-DIAGNOSE (Astra-Directive) --------------------------------
+// Hook auf -[AVCaptureMetadataOutput setMetadataObjectTypes:].
+// Enthält die Liste AVMetadataObjectTypeFace -> App nutzt den Hardware-
+// Detector-Pfad (Daemon-Face-Fix nötig). Sonst -> Vision in der App
+// (läuft auf unseren Pixeln, automatisch konsistent, kein Fix nötig).
+static void (*orig_setMetadataObjectTypes)(id self, SEL _cmd, NSArray *types);
+
+static void hook_setMetadataObjectTypes(id self, SEL _cmd, NSArray *types) {
+    BOOL hasFace = NO;
+    for (id t in types) {
+        if ([t isKindOfClass:[NSString class]] &&
+            [t rangeOfString:@"Face" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            hasFace = YES;
+            break;
+        }
+    }
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+    APILOG("[FACE-PATH] %@ Bundle: %s\n",
+           hasFace ? "DAEMON-FACE-DETECTION-DETECTED (High-Priority Fix)" : "APP-SIDE-VISION-DETECTED (No Fix)",
+           [bundleId UTF8String] ?: "?");
+    // an den Daemon melden (Status-Port): 1=Face-Hardware-Pfad, 2=Vision
+    static int fpTok = -1;
+    if (fpTok < 0) notify_register_check(VCAM_FACEPATH_NOTIFY, &fpTok);
+    if (fpTok >= 0) notify_set_state(fpTok, hasFace ? 1 : 2);
+
+    orig_setMetadataObjectTypes(self, _cmd, types);
+}
+
 static _Atomic int g_installed = 0;
 
 static void installHooks(void) {
@@ -414,7 +443,25 @@ static void installHooks(void) {
         }
     }
 
-    // 5) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
+    // 5) AVCaptureMetadataOutput-Hook: Face-Pfad-Diagnose
+    {
+        Class avMeta = NSClassFromString(@"AVCaptureMetadataOutput");
+        if (!avMeta) avMeta = objc_getClass("AVCaptureMetadataOutput");
+        if (avMeta) {
+            Method m = class_getInstanceMethod(avMeta, sel_registerName("setMetadataObjectTypes:"));
+            if (m) {
+                orig_setMetadataObjectTypes = (void (*)(id, SEL, NSArray *))method_getImplementation(m);
+                method_setImplementation(m, (IMP)hook_setMetadataObjectTypes);
+                APILOG("Hook installiert: AVCaptureMetadataOutput setMetadataObjectTypes:\n");
+            } else {
+                APILOG("KEINE Methode: setMetadataObjectTypes:\n");
+            }
+        } else {
+            APILOG("Klasse nicht gefunden: AVCaptureMetadataOutput\n");
+        }
+    }
+
+    // 6) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
     Class nc = NSClassFromString(@"NSNotificationCenter");
     if (!nc) nc = objc_getClass("NSNotificationCenter");
     if (nc) {

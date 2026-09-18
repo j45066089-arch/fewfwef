@@ -1219,6 +1219,8 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 // umgeht die mediaserverd-Sandbox (Datei-Experiment schlug fehl).
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
 #define VCAM_EXPT_NOTIFY "com.nikeboy.vcam.expt"   // Belichtung (Mikrosekunden) für EXIF in Apps
+#define VCAM_FACEPATH_NOTIFY "com.nikeboy.vcam.facepath"   // App -> Daemon: 1=Face-HW, 2=Vision
+static _Atomic uint64_t g_facePathReported = 0;   // Daemon: zuletzt gemeldeter Face-Pfad
 #define VCAM_APPINJECT_NOTIFY "com.nikeboy.vcam.appinject"   // App -> Daemon Diagnose
 #define VCAM_APPCACHE_NOTIFY "com.nikeboy.vcam.appcache"     // App setzt State: gelesener Cache
 #define VCAM_GETTER_NOTIFY "com.nikeboy.vcam.getters"       // App: Getter-Call-Zähler (Hi=AV, Lo=Fig)
@@ -1796,6 +1798,17 @@ static void statusServerThread(void) {
                 }
             }
         }
+        // DIAG: Face-Pfad der App lesen (1=Hardware-Detector, 2=Vision)
+        {
+            static int fpTok = -1;
+            if (fpTok < 0) notify_register_check(VCAM_FACEPATH_NOTIFY, &fpTok);
+            if (fpTok >= 0) {
+                uint64_t raw = 0;
+                if (notify_get_state(fpTok, &raw) == NOTIFY_STATUS_OK && raw > 0) {
+                    atomic_store(&g_facePathReported, raw);
+                }
+            }
+        }
         // DIAG: Getter-Call-Zähler der App lesen
         {
             static int gcTok = -1;
@@ -1814,7 +1827,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx exifCalls=%llu exifNoPx=%llu exifNoAtt=%llu exifDone=%llu luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx exifCalls=%llu exifNoPx=%llu exifNoAtt=%llu exifDone=%llu facePath=%llu luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1867,6 +1880,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_photoExifNoPx),
             (unsigned long long)atomic_load(&g_photoExifNoAtt),
             (unsigned long long)atomic_load(&g_photoExifDone),
+            (unsigned long long)atomic_load(&g_facePathReported),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
