@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "exif-fix-2"
+#define VCAM_BUILD_ID "exif-fix-3"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1538,13 +1538,33 @@ static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id deleg
 // überschreiben wir ExposureTime (Dashboard expt=) und ISOSpeedRatings
 // (bildbasierte ISO) — so passt das EXIF zum Feed statt zum Sensor.
 // FNumber/FocalLength/LensModel bleiben (Geräte-Wahrheit, korrekt).
+static _Atomic uint64_t g_photoExifCalls = 0;   // rewritePhotoExif aufgerufen
+static _Atomic uint64_t g_photoExifNoPx = 0;    // kein PixelBuffer
+static _Atomic uint64_t g_photoExifNoAtt = 0;   // kein {Exif}-Attachment
+static _Atomic uint64_t g_photoExifDone = 0;    // erfolgreich geschrieben
+
 static void rewritePhotoExif(CMSampleBufferRef sb) {
     if (!sb) return;
+    atomic_fetch_add(&g_photoExifCalls, 1);
     CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
-    if (!px) return;
+    if (!px) { atomic_fetch_add(&g_photoExifNoPx, 1); return; }
     CFDictionaryRef atts = CVBufferGetAttachments(px, kCVAttachmentMode_ShouldPropagate);
     CFDictionaryRef exif = atts ? (CFDictionaryRef)CFDictionaryGetValue(atts, CFSTR("{Exif}")) : NULL;
-    if (!exif) return;
+    if (!exif) {
+        atomic_fetch_add(&g_photoExifNoAtt, 1);
+        // Diagnose: welche Attachment-Keys sind da?
+        static int logged = 0;
+        if (atts && !logged) {
+            logged = 1;
+            CFIndex n = CFDictionaryGetCount(atts);
+            CFStringRef keys[16];
+            CFDictionaryGetKeysAndValues(atts, (const void **)keys, NULL);
+            for (CFIndex i = 0; i < n && i < 16; i++) {
+                L("EXIF-DIAG attachment[%d]=%@", (int)i, keys[i]);
+            }
+        }
+        return;
+    }
 
     CFMutableDictionaryRef mut = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, exif);
     if (!mut) return;
@@ -1583,6 +1603,7 @@ static void rewritePhotoExif(CMSampleBufferRef sb) {
 
     CVBufferSetAttachment(px, CFSTR("{Exif}"), mut, kCVAttachmentMode_ShouldPropagate);
     CFRelease(mut);
+    atomic_fetch_add(&g_photoExifDone, 1);
     L("EXIF-Rewrite: expt=1/%d iso=%lld", den, (long long)iso);
 }
 
@@ -1723,7 +1744,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx exifCalls=%llu exifNoPx=%llu exifNoAtt=%llu exifDone=%llu luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1772,6 +1793,10 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_isoPublishCount),
             (unsigned long long)atomic_load(&g_appCacheReported),
             (unsigned long long)atomic_load(&g_getterReported),
+            (unsigned long long)atomic_load(&g_photoExifCalls),
+            (unsigned long long)atomic_load(&g_photoExifNoPx),
+            (unsigned long long)atomic_load(&g_photoExifNoAtt),
+            (unsigned long long)atomic_load(&g_photoExifDone),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
