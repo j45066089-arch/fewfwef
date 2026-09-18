@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "exif-fix-4"
+#define VCAM_BUILD_ID "exif-fix-5"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1218,6 +1218,7 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 // Cache (nie IPC im Getter). Kein gemeinsamer Dateipfad nötig —
 // umgeht die mediaserverd-Sandbox (Datei-Experiment schlug fehl).
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
+#define VCAM_EXPT_NOTIFY "com.nikeboy.vcam.expt"   // Belichtung (Mikrosekunden) für EXIF in Apps
 #define VCAM_APPINJECT_NOTIFY "com.nikeboy.vcam.appinject"   // App -> Daemon Diagnose
 #define VCAM_APPCACHE_NOTIFY "com.nikeboy.vcam.appcache"     // App setzt State: gelesener Cache
 #define VCAM_GETTER_NOTIFY "com.nikeboy.vcam.getters"       // App: Getter-Call-Zähler (Hi=AV, Lo=Fig)
@@ -1301,6 +1302,16 @@ static void publishISO(uint32_t iso) {
     uint64_t state = packIsoState(iso, seq);
     notify_set_state(g_isoTokenDaemon, state);   // ERST State, DANN Signal
     notify_post(VCAM_ISO_NOTIFY);
+    // expt mitpublizieren (Mikrosekunden), damit Apps dasselbe ins EXIF schreiben
+    {
+        static int exptTok = -1;
+        if (exptTok < 0) notify_register_check(VCAM_EXPT_NOTIFY, &exptTok);
+        if (exptTok >= 0) {
+            float e = g_metaExposure;
+            if (e <= 0.0001f) e = 0.008333f;
+            notify_set_state(exptTok, (uint64_t)(int64_t)(e * 1000000.0f));
+        }
+    }
     atomic_store(&g_isoLastPublishNs, now);
     atomic_store(&g_isoLastPublished, iso);
     atomic_fetch_add(&g_isoPublishCount, 1);
