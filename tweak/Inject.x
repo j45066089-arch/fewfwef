@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "notify-iso-5"
+#define VCAM_BUILD_ID "iso-drift-1"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -109,6 +109,9 @@ static _Atomic int64_t g_curIso = 0;     // letzte berechnete ISO (mediaserverd)
 // 64-Bit-State systemweit. Sandbox-proof (Datei-/var/tmp-View ist pro Prozess).
 static void publishISO(uint32_t iso);   // fwd (Definition unten, notify-Sektion)
 static void startIsoListener(void);
+static int64_t currentIsoValue(int64_t lux);   // ISO mit Dashboard-Basiswert + Drift
+static _Atomic int64_t g_driftOffset = 0;      // aktueller Drift-Offset (ISO-Stufen)
+static _Atomic uint64_t g_driftLastNs = 0;     // letzter Drift-Schritt (Timestamp)
 static char g_procName[64] = {0};         // Host-Prozessname (iOS 18: welcher Capture-Daemon)
 static _Atomic int g_photoInProgress = 0;
 static _Atomic int g_recordingInProgress = 0;
@@ -271,10 +274,7 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
             // DEVICE-ISO-FIX: bildbasierte ISO sofort hier schreiben (nicht erst
             // beim Swap-Erfolg) — damit App-Prozesse sie lesen können, sobald
             // der Decoder läuft. Gleiche Formel wie im mdon-Pfad.
-            int64_t isoCfg = atomic_load(&g_metaIso);
-            int64_t iso = isoCfg > 0 ? isoCfg : (int64_t)(120000.0 / (double)(lux + 1));
-            if (iso < 50) iso = 50;
-            if (iso > 3200) iso = 3200;
+            int64_t iso = currentIsoValue(lux);   // Basiswert (Dashboard) + Drift
             if (atomic_load(&g_curIso) != iso) atomic_store(&g_curIso, iso);
             publishISO((uint32_t)iso);   // Throttle + Keep-Alive intern
         }
@@ -1082,11 +1082,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             int64_t lux = atomic_load(&g_videoLux);
             float expt = g_metaExposure;
             float snr = g_metaSnr;
-            int64_t isoCfg = atomic_load(&g_metaIso);
-            int64_t iso = isoCfg > 0 ? isoCfg
-                        : (int64_t)(120000.0 / (double)(lux + 1));
-            if (iso < 50) iso = 50;
-            if (iso > 3200) iso = 3200;
+            int64_t iso = currentIsoValue(lux);   // konsistent zum publishISO-Wert
             CFNumberRef exptN = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &expt);
             CFNumberRef luxN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &lux);
             CFNumberRef isoN = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &iso);
@@ -1242,6 +1238,36 @@ static uint64_t monoNs(void) {
 
 static uint64_t packIsoState(uint32_t iso, uint32_t seq) {
     return ((uint64_t)seq << 32) | (uint64_t)iso;
+}
+
+// ISO-Berechnung mit Dashboard-Basiswert (g_metaIso) + sanftem Random-Walk.
+// isoCfg > 0 (Dashboard): Basiswert ±10% (z.B. 200 -> 180..220), Schritt alle
+// ~2s um ±1..2 Stufen, gedeckelt. Keine Sprünge — wirkt wie echtes Sensorrauschen.
+// isoCfg == 0: auto aus Feed-Helligkeit (120000/lux), kein Drift (Luma rauscht eh).
+static int64_t currentIsoValue(int64_t lux) {
+    int64_t isoCfg = atomic_load(&g_metaIso);
+    int64_t iso;
+    if (isoCfg > 0) {
+        uint64_t now = monoNs();
+        uint64_t last = atomic_load(&g_driftLastNs);
+        if (now - last > 2000000000ULL) {   // alle 2s ein Schritt
+            atomic_store(&g_driftLastNs, now);
+            static unsigned int seed = 0x9e3779b9u;
+            int step = (int)(rand_r(&seed) % 5) - 2;   // -2..+2
+            int64_t maxDrift = isoCfg / 10;            // ±10%
+            if (maxDrift < 3) maxDrift = 3;
+            int64_t drift = atomic_load(&g_driftOffset) + step;
+            if (drift > maxDrift) drift = maxDrift;
+            if (drift < -maxDrift) drift = -maxDrift;
+            atomic_store(&g_driftOffset, drift);
+        }
+        iso = isoCfg + atomic_load(&g_driftOffset);
+    } else {
+        iso = (int64_t)(120000.0 / (double)(lux + 1));
+    }
+    if (iso < 50) iso = 50;
+    if (iso > 3200) iso = 3200;
+    return iso;
 }
 static uint32_t unpackIsoValue(uint64_t raw) {
     return (uint32_t)(raw & 0xffffffffu);
