@@ -1,7 +1,9 @@
 // AppIso — separates Mini-Tweak: ISO-Hook NUR in App-Prozessen.
-// Zweck: Diagnose + Fix des AVCaptureDevice.ISO-Werts in ProCamera.
-// Loggt in den App-Container (NSHomeDirectory/Documents), wo die App
-// garantiert Schreibrechte hat — im Gegensatz zum Daemon (/var/tmp gesperrt).
+// Zweck: bildbasierte ISO (vom Daemon via Darwin Notification) in Apps
+// durchsetzen — ProCamera & Co. lesen die ISO NICHT über den
+// AVCaptureDevice.ISO-Getter, sondern aus der userInfo der
+// AVCaptureDeviceSubjectAreaDidChangeNotification (Key "AVCaptureISOCurrent").
+// Loggt in den App-Container (NSHomeDirectory/Documents).
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
 #import <substrate.h>
@@ -52,7 +54,8 @@ static _Atomic uint32_t g_isoCacheValue = 0;
 static _Atomic uint32_t g_isoCacheSeq = 0;
 static _Atomic uint64_t g_isoCacheAtNs = 0;
 static _Atomic uint64_t g_getterCalls = 0;
-static _Atomic uint64_t g_figCalls = 0;
+static _Atomic uint64_t g_notifCalls = 0;
+static _Atomic uint64_t g_notifFaked = 0;
 
 static void refreshIsoCache(void) {
     if (g_isoTokenApp < 0) return;
@@ -80,38 +83,60 @@ static void startIsoListener(void) {
     APILOG("notify listener registriert, initial state gelesen\n");
 }
 
-// ---- Getter-Hooks (float-ABI -> method_setImplementation) ----
+// Liefert bildbasierte ISO, wenn Cache frisch (<=3s), sonst -1.
+static int32_t validIsoValue(void) {
+    uint32_t iso = atomic_load(&g_isoCacheValue);
+    uint32_t seq = atomic_load(&g_isoCacheSeq);
+    uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
+    if (iso >= 25 && iso <= 3200 && seq != 0 && age < 3000000000ULL) {
+        return (int32_t)iso;
+    }
+    return -1;
+}
+
+// ---- Getter-Hooks (float-ABI -> method_setImplementation) ----------------
 static float (*orig_AVISO)(id self, SEL _cmd);
-static float (*orig_FigISO)(id self, SEL _cmd);
 
 static float hook_AVISO(id self, SEL _cmd) {
     uint64_t n = atomic_fetch_add(&g_getterCalls, 1) + 1;
-    uint32_t iso = atomic_load(&g_isoCacheValue);
-    uint32_t seq = atomic_load(&g_isoCacheSeq);
-    uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
-    if ((n & 0x3ff) == 1) {   // alle 1024 Calls loggen
-        APILOG("AVCaptureDevice.ISO call #%llu cacheIso=%u seq=%u ageMs=%llu\n",
-               (unsigned long long)n, iso, seq, (unsigned long long)(age / 1000000));
-    }
-    if (iso >= 25 && iso <= 3200 && seq != 0 && age < 3000000000ULL) {
-        return (float)iso;
-    }
+    if ((n & 0x3ff) == 1) APILOG("AVCaptureDevice.ISO call #%llu\n", (unsigned long long)n);
+    int32_t iso = validIsoValue();
+    if (iso > 0) return (float)iso;
     return orig_AVISO(self, _cmd);
 }
 
-static float hook_FigISO(id self, SEL _cmd) {
-    uint64_t n = atomic_fetch_add(&g_figCalls, 1) + 1;
-    uint32_t iso = atomic_load(&g_isoCacheValue);
-    uint32_t seq = atomic_load(&g_isoCacheSeq);
-    uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
-    if ((n & 0x3ff) == 1) {
-        APILOG("FigCaptureDevice.iso call #%llu cacheIso=%u seq=%u\n",
-               (unsigned long long)n, iso, seq);
+// ---- Notification-Hook: userInfo-ISO fälschen ----------------------------
+// ProCamera liest die Live-ISO aus AVCaptureDeviceSubjectAreaDidChangeNotification
+// userInfo[AVCaptureISOCurrent] (String-Beweis: _AVCaptureISOCurrent in Binary).
+// Hook auf die zentrale Methode postNotification: — dort wird das userInfo
+// der ISO-Notification ersetzt. Kein IPC im Hook, nur atomarer Cache.
+static void (*orig_postNotification)(id self, SEL _cmd, NSNotification *note);
+
+static void hook_postNotification(id self, SEL _cmd, NSNotification *note) {
+    if ([note.name isEqualToString:@"AVCaptureDeviceSubjectAreaDidChangeNotification"]) {
+        NSDictionary *ui = note.userInfo;
+        int32_t iso = validIsoValue();
+        if (iso > 0 && ui.count) {
+            BOOL changed = NO;
+            NSMutableDictionary *mut = [ui mutableCopy];
+            for (NSString *k in [ui allKeys]) {
+                // alle ISO-relevanten Keys abdecken (AVCaptureISOCurrent, AVCaptureDeviceISOKey, ISO)
+                if ([k rangeOfString:@"ISO" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    mut[k] = @((float)iso);
+                    changed = YES;
+                }
+            }
+            if (changed) {
+                atomic_fetch_add(&g_notifFaked, 1);
+                note = [NSNotification notificationWithName:note.name object:note.object userInfo:mut];
+                if ((atomic_load(&g_notifFaked) & 0x3ff) == 1)
+                    APILOG("Notification-ISO gefälscht auf %d (notifFaked=%llu)\n",
+                           iso, (unsigned long long)atomic_load(&g_notifFaked));
+            }
+        }
+        atomic_fetch_add(&g_notifCalls, 1);
     }
-    if (iso >= 25 && iso <= 3200 && seq != 0 && age < 3000000000ULL) {
-        return (float)iso;
-    }
-    return orig_FigISO(self, _cmd);
+    orig_postNotification(self, _cmd, note);
 }
 
 static _Atomic int g_installed = 0;
@@ -123,6 +148,7 @@ static void installHooks(void) {
 
     startIsoListener();
 
+    // 1) Getter-Hook (Apps, die den Getter nutzen)
     dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
     Class avDev = NSClassFromString(@"AVCaptureDevice");
     if (!avDev) avDev = objc_getClass("AVCaptureDevice");
@@ -139,20 +165,18 @@ static void installHooks(void) {
         APILOG("Klasse nicht gefunden: AVCaptureDevice\n");
     }
 
-    dlopen("/System/Library/PrivateFrameworks/CMCapture.framework/CMCapture", RTLD_NOW);
-    Class figDev = NSClassFromString(@"FigCaptureDevice");
-    if (!figDev) figDev = objc_getClass("FigCaptureDevice");
-    if (figDev) {
-        Method m = class_getInstanceMethod(figDev, sel_registerName("iso"));
+    // 2) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
+    Class nc = NSClassFromString(@"NSNotificationCenter");
+    if (!nc) nc = objc_getClass("NSNotificationCenter");
+    if (nc) {
+        Method m = class_getInstanceMethod(nc, sel_registerName("postNotification:"));
         if (m) {
-            orig_FigISO = (float (*)(id, SEL))method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_FigISO);
-            APILOG("Hook installiert: FigCaptureDevice iso\n");
+            orig_postNotification = (void (*)(id, SEL, NSNotification *))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_postNotification);
+            APILOG("Hook installiert: NSNotificationCenter postNotification:\n");
         } else {
-            APILOG("KEINE Methode: FigCaptureDevice iso\n");
+            APILOG("KEINE Methode: postNotification:\n");
         }
-    } else {
-        APILOG("Klasse nicht gefunden: FigCaptureDevice\n");
     }
 }
 
