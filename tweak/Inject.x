@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "notify-iso-2"
+#define VCAM_BUILD_ID "notify-iso-3"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1222,6 +1222,8 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 // Cache (nie IPC im Getter). Kein gemeinsamer Dateipfad nötig —
 // umgeht die mediaserverd-Sandbox (Datei-Experiment schlug fehl).
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
+#define VCAM_APPINJECT_NOTIFY "com.nikeboy.vcam.appinject"   // App -> Daemon Diagnose
+static _Atomic uint32_t g_appInjectCount = 0;   // Daemon: wie oft App-Hook gemeldet
 
 static uint64_t monoNs(void) {
     static mach_timebase_info_data_t tb = {0};
@@ -1548,7 +1550,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1593,6 +1595,7 @@ static void statusServerThread(void) {
             (int)atomic_load(&g_diag),
             (int)atomic_load(&g_metaOn),
             (int)atomic_load(&g_portraitSwap),
+            (unsigned)atomic_load(&g_appInjectCount),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
@@ -2282,6 +2285,7 @@ static void installDeviceIsoHook(void) {
         if (mISO) {
             orig_AVCaptureDevice_ISO = (float (*)(id, SEL))method_getImplementation(mISO);
             method_setImplementation(mISO, (IMP)hook_AVCaptureDevice_ISO);
+            notify_post(VCAM_APPINJECT_NOTIFY);   // Daemon-Diagnose: Hook installiert
             FLOG("Hook: AVCaptureDevice ISO via method_setImplementation (float)\n");
         } else {
             FLOG("Hook: AVCaptureDevice ISO-Methode nicht gefunden\n");
@@ -2322,6 +2326,16 @@ void VCamInject_start(void) {
         // damit nicht der falsche Prozess Port 8769 gewinnt.
         FLOG("ctor: proc=%s inaktiv -> return (kein Server)\n", [proc UTF8String] ?: "?");
         return;
+    }
+
+    // DEVICE-ISO-DIAG: App-Meldungen zählen (zeigt im Status, ob der
+    // AVCaptureDevice-Hook in App-Prozessen installiert wurde).
+    {
+        static int diagTok = -1;
+        uint32_t r = notify_register_dispatch(VCAM_APPINJECT_NOTIFY, &diagTok,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+            ^(int token) { atomic_fetch_add(&g_appInjectCount, 1); });
+        if (r == NOTIFY_STATUS_OK) L("Diag: appinject-Listener registriert");
     }
 
     // LORDVCAM-STIL (1): Private Frameworks VOR dem Hooken laden.
