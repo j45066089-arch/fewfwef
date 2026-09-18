@@ -205,6 +205,12 @@ static void logCCC(const char *sel, id obj, const char *type, uint64_t n) {
 static float (*orig_ccc_ISOFunc)(id, SEL);
 static float hook_ccc_ISO(id self, SEL _cmd) {
     atomic_fetch_add(&g_cccISOCalls, 1);
+    int32_t fake = validIsoValue();
+    if (fake > 0) {
+        if ((atomic_load(&g_cccISOCalls) & 0x3ff) == 1)
+            APILOG("CCCameraController ISO -> FAKE %d (statt orig)\n", fake);
+        return (float)fake;
+    }
     logCCC("ISO", self, "f", atomic_load(&g_cccISOCalls));
     return orig_ccc_ISOFunc(self, _cmd);
 }
@@ -224,8 +230,12 @@ static float hook_ccc_MaxISO(id self, SEL _cmd) {
 static void (*orig_ccc_SetFunc)(id, SEL, float);
 static void hook_ccc_SetISO(id self, SEL _cmd, float iso) {
     atomic_fetch_add(&g_cccSetCalls, 1);
-    APILOG("CCCameraController setISO: %.1f call #%llu\n", iso,
-           (unsigned long long)atomic_load(&g_cccSetCalls));
+    int32_t fake = validIsoValue();
+    if (fake > 0) {
+        if ((atomic_load(&g_cccSetCalls) & 0x3ff) == 1)
+            APILOG("CCCameraController setISO: %.1f -> FAKE %d (erstattet)\n", iso, fake);
+        iso = (float)fake;
+    }
     orig_ccc_SetFunc(self, _cmd, iso);
 }
 
