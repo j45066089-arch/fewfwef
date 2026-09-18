@@ -20,6 +20,7 @@
 #import <execinfo.h>
 
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
+#define VCAM_EXPT_NOTIFY "com.nikeboy.vcam.expt"
 
 static void APILOG(const char *fmt, ...) {
     char buf[1024];
@@ -57,11 +58,23 @@ static _Atomic uint64_t g_isoCacheAtNs = 0;
 static _Atomic uint64_t g_getterCalls = 0;
 static _Atomic uint64_t g_notifCalls = 0;
 static _Atomic uint64_t g_notifFaked = 0;
+static _Atomic uint64_t g_exptUs = 0;      // Belichtung in Mikrosekunden (vom Daemon)
 
 static void refreshIsoCache(void) {
     if (g_isoTokenApp < 0) return;
     uint64_t raw = 0;
     if (notify_get_state(g_isoTokenApp, &raw) != NOTIFY_STATUS_OK) return;
+    // expt mitlesen
+    {
+        static int exptTok = -1;
+        if (exptTok < 0) notify_register_check(VCAM_EXPT_NOTIFY, &exptTok);
+        if (exptTok >= 0) {
+            uint64_t e = 0;
+            if (notify_get_state(exptTok, &e) == NOTIFY_STATUS_OK && e > 0) {
+                atomic_store(&g_exptUs, e);
+            }
+        }
+    }
     uint32_t iso = (uint32_t)(raw & 0xffffffffu);
     uint32_t seq = (uint32_t)(raw >> 32);
     if (iso < 25 || iso > 3200) return;
@@ -279,6 +292,45 @@ static void installCCCHooks(Class cls) {
     }
 }
 
+// ---- FOTO-EXIF: AVCapturePhotoSettings.metadata fälschen ------------------
+// Apple schreibt settings.metadata ({Exif}-Keys) ins fertige Foto-EXIF.
+// Beim capturePhoto-Aufruf befüllen wir es mit bildbasierter ISO + expt.
+static void (*orig_capturePhotoDelegate)(id self, SEL _cmd, id settings, id delegate);
+static void (*orig_capturePhotoCompletion)(id self, SEL _cmd, id settings, id delegate, id handler);
+
+static void injectPhotoExif(id settings) {
+    int32_t iso = validIsoValue();
+    if (iso <= 0) return;
+    uint64_t exptUs = atomic_load(&g_exptUs);
+    if (exptUs == 0) exptUs = 8333;   // default 1/120s
+
+    NSMutableDictionary *meta = [[settings valueForKey:@"metadata"] mutableCopy];
+    if (!meta) meta = [NSMutableDictionary dictionary];
+    NSMutableDictionary *exif = [meta[@"{Exif}"] mutableCopy];
+    if (!exif) exif = [NSMutableDictionary dictionary];
+
+    // ExposureTime: Apple erwartet hier die Sekunden als NSNumber (double)
+    exif[@"ExposureTime"] = @(exptUs / 1000000.0);
+    // ISOSpeedRatings: Array von NSNumbers
+    exif[@"ISOSpeedRatings"] = @[ @(iso) ];
+
+    meta[@"{Exif}"] = exif;
+    [settings setValue:meta forKey:@"metadata"];
+
+    static _Atomic uint64_t cnt = 0;
+    uint64_t n = atomic_fetch_add(&cnt, 1) + 1;
+    if ((n & 0xf) == 1) APILOG("Photo-EXIF injiziert: ISO=%d expt=%.6f\n", iso, exptUs / 1000000.0);
+}
+
+static void hook_capturePhotoDelegate(id self, SEL _cmd, id settings, id delegate) {
+    injectPhotoExif(settings);
+    orig_capturePhotoDelegate(self, _cmd, settings, delegate);
+}
+static void hook_capturePhotoCompletion(id self, SEL _cmd, id settings, id delegate, id handler) {
+    injectPhotoExif(settings);
+    orig_capturePhotoCompletion(self, _cmd, settings, delegate, handler);
+}
+
 static _Atomic int g_installed = 0;
 
 static void installHooks(void) {
@@ -340,7 +392,29 @@ static void installHooks(void) {
         }
     }
 
-    // 4) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
+    // 4) AVCapturePhotoOutput-Hook: EXIF-Metadaten beim Foto-Capture injizieren
+    {
+        Class avPhoto = NSClassFromString(@"AVCapturePhotoOutput");
+        if (!avPhoto) avPhoto = objc_getClass("AVCapturePhotoOutput");
+        if (avPhoto) {
+            Method m1 = class_getInstanceMethod(avPhoto, sel_registerName("capturePhotoWithSettings:delegate:"));
+            if (m1) {
+                orig_capturePhotoDelegate = (void (*)(id, SEL, id, id))method_getImplementation(m1);
+                method_setImplementation(m1, (IMP)hook_capturePhotoDelegate);
+                APILOG("Hook installiert: AVCapturePhotoOutput capturePhoto\n");
+            }
+            Method m2 = class_getInstanceMethod(avPhoto, sel_registerName("capturePhotoWithSettings:delegate:completionHandler:"));
+            if (m2) {
+                orig_capturePhotoCompletion = (void (*)(id, SEL, id, id, id))method_getImplementation(m2);
+                method_setImplementation(m2, (IMP)hook_capturePhotoCompletion);
+                APILOG("Hook installiert: AVCapturePhotoOutput capturePhoto(completion)\n");
+            }
+        } else {
+            APILOG("Klasse nicht gefunden: AVCapturePhotoOutput\n");
+        }
+    }
+
+    // 5) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
     Class nc = NSClassFromString(@"NSNotificationCenter");
     if (!nc) nc = objc_getClass("NSNotificationCenter");
     if (nc) {
