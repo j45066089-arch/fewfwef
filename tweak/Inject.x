@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "notify-iso-4"
+#define VCAM_BUILD_ID "notify-iso-5"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -1224,9 +1224,11 @@ static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
 #define VCAM_ISO_NOTIFY "com.nikeboy.vcam.iso"
 #define VCAM_APPINJECT_NOTIFY "com.nikeboy.vcam.appinject"   // App -> Daemon Diagnose
 #define VCAM_APPCACHE_NOTIFY "com.nikeboy.vcam.appcache"     // App setzt State: gelesener Cache
+#define VCAM_GETTER_NOTIFY "com.nikeboy.vcam.getters"       // App: Getter-Call-Zähler (Hi=AV, Lo=Fig)
 static _Atomic uint32_t g_appInjectCount = 0;   // Daemon: wie oft App-Hook gemeldet
 static _Atomic uint64_t g_appCacheReported = 0; // Daemon: App-Cache-Wert (von App gesetzt)
 static _Atomic uint64_t g_isoPublishCount = 0;  // Daemon: wie oft publiziert
+static _Atomic uint64_t g_getterReported = 0;   // Daemon: Getter-Zähler der App
 
 static uint64_t monoNs(void) {
     static mach_timebase_info_data_t tb = {0};
@@ -1296,6 +1298,21 @@ static void refreshIsoCache(void) {
         if (cacheTok < 0) notify_register_check(VCAM_APPCACHE_NOTIFY, &cacheTok);
         if (cacheTok >= 0) notify_set_state(cacheTok, packIsoState(iso, seq));
     }
+    // Getter-Call-Zähler melden (High=AVCaptureDevice-Calls, Low=FigCapture-Calls),
+    // max 1x/500ms — zeigt ob ProCamera den Hook überhaupt aufruft.
+    {
+        uint64_t now = monoNs();
+        if (now - atomic_load(&g_getterReportNs) > 500000000ULL) {
+            atomic_store(&g_getterReportNs, now);
+            static int gcTok = -1;
+            if (gcTok < 0) notify_register_check(VCAM_GETTER_NOTIFY, &gcTok);
+            if (gcTok >= 0) {
+                uint64_t v = ((atomic_load(&g_getterCalls) & 0xffffffffULL) << 32)
+                           | (atomic_load(&g_figGetterCalls) & 0xffffffffULL);
+                notify_set_state(gcTok, v);
+            }
+        }
+    }
 }
 
 static void startIsoListener(void) {
@@ -1309,7 +1326,15 @@ static void startIsoListener(void) {
 
 // Hook: -[AVCaptureDevice ISO] -> atomarer Cache, kein IPC im Getter.
 static float (*orig_AVCaptureDevice_ISO)(id self, SEL _cmd);
+// FigCaptureDevice (privat, CMCaptureCore): Pro-Apps (ProCamera/Halide) lesen
+// die Live-ISO oft direkt dort statt über das öffentliche AVCaptureDevice.
+static float (*orig_FigCaptureDevice_iso)(id self, SEL _cmd);
+static _Atomic uint64_t g_getterCalls = 0;          // App: wie oft der Hook feuerte
+static _Atomic uint64_t g_figGetterCalls = 0;       // App: wie oft FigCapture-Hook feuerte
+static _Atomic uint64_t g_getterReportNs = 0;       // Throttle für Rückmeldung
+
 static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
+    atomic_fetch_add(&g_getterCalls, 1);
     uint32_t iso = atomic_load(&g_isoCacheValue);
     uint32_t seq = atomic_load(&g_isoCacheSeq);
     uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
@@ -1324,6 +1349,18 @@ static float hook_AVCaptureDevice_ISO(id self, SEL _cmd) {
         return v;
     }
     return orig_AVCaptureDevice_ISO(self, _cmd);
+}
+
+// Privater Pfad: -[FigCaptureDevice iso] (float) — gleicher Cache.
+static float hook_FigCaptureDevice_iso(id self, SEL _cmd) {
+    atomic_fetch_add(&g_figGetterCalls, 1);
+    uint32_t iso = atomic_load(&g_isoCacheValue);
+    uint32_t seq = atomic_load(&g_isoCacheSeq);
+    uint64_t age = monoNs() - atomic_load(&g_isoCacheAtNs);
+    if (iso >= 25 && iso <= 3200 && seq != 0 && age < 3000000000ULL) {
+        return (float)iso;
+    }
+    return orig_FigCaptureDevice_iso(self, _cmd);
 }
 
 // ----------------------------------------------------------------
@@ -1564,6 +1601,17 @@ static void statusServerThread(void) {
                 }
             }
         }
+        // DIAG: Getter-Call-Zähler der App lesen
+        {
+            static int gcTok = -1;
+            if (gcTok < 0) notify_register_check(VCAM_GETTER_NOTIFY, &gcTok);
+            if (gcTok >= 0) {
+                uint64_t raw = 0;
+                if (notify_get_state(gcTok, &raw) == NOTIFY_STATUS_OK) {
+                    atomic_store(&g_getterReported, raw);
+                }
+            }
+        }
         char msg[16384];
         int w = snprintf(msg, sizeof(msg),
             "build=%s proc=%s stage=%d\n"
@@ -1571,7 +1619,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
-            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d skip420v=%llu skipPort=%llu rot=%lld rotv=%lld rote=%lld rng=%lld rotApp=%llu dup=%llu urel=%d diag=%d mdon=%d portrait=%d appInject=%u isoPub=%llu appCache=0x%llx getters=0x%llx luma=%lld lux=%lld expt=%.6f snr=%.1f iso=%lld "
             "vtAttempts=%llu vtError=%lld\n",
             VCAM_BUILD_ID,
             g_procName,
@@ -1619,6 +1667,7 @@ static void statusServerThread(void) {
             (unsigned)atomic_load(&g_appInjectCount),
             (unsigned long long)atomic_load(&g_isoPublishCount),
             (unsigned long long)atomic_load(&g_appCacheReported),
+            (unsigned long long)atomic_load(&g_getterReported),
             (long long)atomic_load(&g_videoLuma),
             (long long)atomic_load(&g_videoLux),
             (double)g_metaExposure,
@@ -2312,6 +2361,18 @@ static void installDeviceIsoHook(void) {
             FLOG("Hook: AVCaptureDevice ISO via method_setImplementation (float)\n");
         } else {
             FLOG("Hook: AVCaptureDevice ISO-Methode nicht gefunden\n");
+        }
+    }
+    // Privater Pfad: -[FigCaptureDevice iso] — Pro-Apps (ProCamera) lesen dort.
+    dlopen("/System/Library/PrivateFrameworks/CMCapture.framework/CMCapture", RTLD_NOW);
+    Class figDev = NSClassFromString(@"FigCaptureDevice");
+    if (!figDev) figDev = objc_getClass("FigCaptureDevice");
+    if (figDev && !orig_FigCaptureDevice_iso) {
+        Method mIso = class_getInstanceMethod(figDev, sel_registerName("iso"));
+        if (mIso) {
+            orig_FigCaptureDevice_iso = (float (*)(id, SEL))method_getImplementation(mIso);
+            method_setImplementation(mIso, (IMP)hook_FigCaptureDevice_iso);
+            FLOG("Hook: FigCaptureDevice iso (float)\n");
         }
     }
 }
