@@ -139,6 +139,40 @@ static void hook_postNotification(id self, SEL _cmd, NSNotification *note) {
     orig_postNotification(self, _cmd, note);
 }
 
+// ---- KVO-Hook: ISO-Wert im Change-Dictionary ersetzen -------------------
+static void (*orig_observeValue)(id self, SEL _cmd, NSString *keyPath, id object, NSDictionary *change, void *context);
+static _Atomic uint64_t g_kvoObserved = 0;
+static _Atomic uint64_t g_kvoFaked = 0;
+
+static void hook_observeValue(id self, SEL _cmd, NSString *keyPath, id object,
+                              NSDictionary *change, void *context) {
+    // KeyPath-Log (nur ISO-relevante, gedrosselt)
+    if ([keyPath rangeOfString:@"ISO" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [keyPath rangeOfString:@"exposure" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        atomic_fetch_add(&g_kvoObserved, 1);
+        uint64_t n = atomic_load(&g_kvoObserved);
+        if ((n & 0x3ff) == 1) {
+            APILOG("KVO: keyPath=%@ obj=%@ change=%@\n", keyPath, [object class],
+                   change ? change : @"{nil}");
+        }
+    }
+    // ISO-KeyPath: NewKey-Wert fälschen
+    if ([keyPath rangeOfString:@"ISO" options:NSCaseInsensitiveSearch].location != NSNotFound && change) {
+        int32_t iso = validIsoValue();
+        if (iso > 0 && change[NSKeyValueChangeNewKey]) {
+            NSMutableDictionary *mut = [change mutableCopy];
+            mut[NSKeyValueChangeNewKey] = @((float)iso);
+            change = mut;
+            atomic_fetch_add(&g_kvoFaked, 1);
+            uint64_t f = atomic_load(&g_kvoFaked);
+            if ((f & 0x3ff) == 1) {
+                APILOG("KVO-ISO gefälscht auf %d (faked=%llu)\n", iso, (unsigned long long)f);
+            }
+        }
+    }
+    orig_observeValue(self, _cmd, keyPath, object, change, context);
+}
+
 static _Atomic int g_installed = 0;
 
 static void installHooks(void) {
@@ -165,7 +199,17 @@ static void installHooks(void) {
         APILOG("Klasse nicht gefunden: AVCaptureDevice\n");
     }
 
-    // 2) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
+    // 2) KVO-Hook (ProCamera-Pfad: ISO via KVO-Change-Dictionary)
+    {
+        Method m = class_getInstanceMethod([NSObject class], sel_registerName("observeValueForKeyPath:ofObject:change:context:"));
+        if (m) {
+            orig_observeValue = (void (*)(id, SEL, NSString *, id, NSDictionary *, void *))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_observeValue);
+            APILOG("Hook installiert: NSObject observeValueForKeyPath\n");
+        }
+    }
+
+    // 3) Notification-Hook (ProCamera-Pfad: userInfo-ISO)
     Class nc = NSClassFromString(@"NSNotificationCenter");
     if (!nc) nc = objc_getClass("NSNotificationCenter");
     if (nc) {
