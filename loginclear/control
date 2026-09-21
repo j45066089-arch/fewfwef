@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcloginclear
+Name: VCam Login löschen
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Schwebender Button in SpringBoard, der den LordVCAM-Keychain-Eintrag (com.apple.avsd.auth) löscht, damit LordVCAM beim nächsten Start frisch einloggt.
+Maintainer: nikeboy
+Author: nikeboy
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
