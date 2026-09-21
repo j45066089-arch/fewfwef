@@ -42,13 +42,15 @@ static BOOL ServerRunning(void) {
 }
 
 static void StartServer(void) {
-    pid_t kpid;
-    char *kargv[] = { "/usr/bin/pkill", "-9", "-f", "fake_license_server", NULL };
-    posix_spawn(&kpid, "/usr/bin/pkill", NULL, NULL, kargv, environ);
-
+    // KEIN pkill (existiert nicht auf dem Gerät). Stattdessen: alten Server
+    // über killall beenden, falls vorhanden — aber killall ist auch nicht
+    // überall. Einfachster robuster Weg: direkt spawnen, Port-443-Bind
+    // schlägt fehl wenn schon einer läuft (dann ist er eh schon da).
     const char *py = "/var/jb/usr/bin/python3";
     const char *srv = "/var/jb/var/tmp/lordvcam-server/fake_license_server.py";
-    int logfd = open("/var/mobile/Library/lordvcam_server.log",
+    // Log in einen mobile-beschreibbaren Pfad (NICHT /var/mobile/Library,
+    // das gehört root und lässt mobile nicht schreiben -> spawn scheitert).
+    int logfd = open("/var/tmp/lordvcam_server.log",
                      O_WRONLY | O_CREAT | O_APPEND, 0644);
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
@@ -59,7 +61,7 @@ static void StartServer(void) {
     }
     const char *argv[] = { py, "-u", srv, NULL };
     pid_t pid;
-    posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    int rc = posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (logfd >= 0) close(logfd);
 }
