@@ -18,6 +18,7 @@
 #import <spawn.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <string.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -206,10 +207,14 @@ static OSStatus DeleteLoginState(void) {
 @end
 
 int main(int argc, char *argv[]) {
-    // DEBUG: allererster Log direkt in main() — testet ob die Binary ueberhaupt laeuft
-    int dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (dbg >= 0) { write(dbg, "main() entered\n", 15); close(dbg); }
+    // Astra-Test: Log in den App-Container (unabhaengig von /var/tmp sandbox-sicht)
+    // + stderr, damit wir sehen ob main() laeuft.
+    const char *msg = "VCamServerStart main entered\n";
+    write(STDERR_FILENO, msg, strlen(msg));
     @autoreleasepool {
+        NSString *home = NSHomeDirectory();
+        NSString *marker = [home stringByAppendingPathComponent:@"didLaunch.marker"];
+        [@"main() entered\n" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
     }
 }
