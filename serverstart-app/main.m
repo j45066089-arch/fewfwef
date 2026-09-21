@@ -1,6 +1,18 @@
-// VCamServerStart — App-Icon auf dem Homescreen: ein Tipp startet den
-// LordVCAM-Fake-Server (Port 443) per posix_spawn. Kein launchd, kein Root-Helper.
-// Läuft als normale mobile-App (Server bindet hier als mobile, Port 443 ist offen).
+// VCamServerStart — Homescreen-App-Icon mit zwei Knöpfen:
+//   1) "Server starten"  — startet den LordVCAM-Fake-Server (Port 443)
+//   2) "Login löschen"   — löscht den Keychain-Eintrag "com.apple.avsd.auth",
+//                          damit LordVCAM beim nächsten Start frisch einloggt
+//                          (behebt "Not authenticated" nach Respring/Neuinstallation)
+//
+// Keychain-Detail (aus der Dylib verifiziert):
+//   kSecClass=GenericPassword, kSecAttrService="com.apple.avsd.auth",
+//   kSecAttrAccount=<account>, kSecAttrAccessible=AfterFirstUnlockThisDeviceOnly
+//
+// Läuft als normale mobile-App → Keychain-Access-Group ist die App-Gruppe.
+// WICHTIG (roothide): Der Tweak (in SpringBoard) nutzt die Access-Group, die vom
+// Security-Framework des Prozesses abgeleitet wird. Ein einfacher SecItemDelete mit
+// passendem Service+Account aus einer anderen App kann am Access-Group-Mismatch
+// scheitern — deshalb versuchen wir mehrere Varianten.
 
 #import <UIKit/UIKit.h>
 #import <spawn.h>
@@ -8,10 +20,12 @@
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
+#import <Security/Security.h>
 
 extern char **environ;
 
 #define SERVER_PORT 443
+#define KC_SERVICE @"com.apple.avsd.auth"
 
 static BOOL ServerRunning(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -50,11 +64,24 @@ static void StartServer(void) {
     if (logfd >= 0) close(logfd);
 }
 
+// LÖSCHT alle Generic-Password-Einträge mit Service "com.apple.avsd.auth",
+// egal welcher Account. Rückgabe: Zahl der gelöschten Einträge.
+static OSStatus DeleteLoginState(void) {
+    NSMutableDictionary *query = [NSMutableDictionary dictionary];
+    query[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+    query[(__bridge id)kSecAttrService] = KC_SERVICE;
+    // Account weglassen → löscht ALLE Einträge dieses Service.
+    // (Security-Framework löscht bei SecItemDelete mit matchingQuery alle Treffer.)
+    OSStatus st = SecItemDelete((__bridge CFDictionaryRef)query);
+    return st;
+}
+
 @interface ViewController : UIViewController
 @end
 
 @implementation ViewController {
-    UIButton *_btn;
+    UIButton *_btnServer;
+    UIButton *_btnClear;
     UILabel *_status;
     BOOL _busy;
 }
@@ -63,21 +90,35 @@ static void StartServer(void) {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
 
-    _btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    _btn.frame = CGRectMake(40, 180, self.view.bounds.size.width - 80, 120);
-    _btn.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0];
-    _btn.layer.cornerRadius = 20;
-    [_btn setTitle:@"Server starten" forState:UIControlStateNormal];
-    [_btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _btn.titleLabel.font = [UIFont boldSystemFontOfSize:28];
-    [_btn addTarget:self action:@selector(tapped)
-        forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_btn];
+    CGFloat w = self.view.bounds.size.width;
 
-    _status = [[UILabel alloc] initWithFrame:CGRectMake(40, 340, self.view.bounds.size.width - 80, 40)];
+    _btnServer = [UIButton buttonWithType:UIButtonTypeSystem];
+    _btnServer.frame = CGRectMake(40, 140, w - 80, 90);
+    _btnServer.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0];
+    _btnServer.layer.cornerRadius = 18;
+    [_btnServer setTitle:@"Server starten" forState:UIControlStateNormal];
+    [_btnServer setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _btnServer.titleLabel.font = [UIFont boldSystemFontOfSize:24];
+    [_btnServer addTarget:self action:@selector(tappedServer)
+        forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_btnServer];
+
+    _btnClear = [UIButton buttonWithType:UIButtonTypeSystem];
+    _btnClear.frame = CGRectMake(40, 250, w - 80, 90);
+    _btnClear.backgroundColor = [UIColor colorWithRed:0.85 green:0.35 blue:0.1 alpha:1.0];
+    _btnClear.layer.cornerRadius = 18;
+    [_btnClear setTitle:@"Login löschen" forState:UIControlStateNormal];
+    [_btnClear setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _btnClear.titleLabel.font = [UIFont boldSystemFontOfSize:24];
+    [_btnClear addTarget:self action:@selector(tappedClear)
+        forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_btnClear];
+
+    _status = [[UILabel alloc] initWithFrame:CGRectMake(40, 370, w - 80, 60)];
     _status.textAlignment = NSTextAlignmentCenter;
     _status.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
-    _status.font = [UIFont systemFontOfSize:16];
+    _status.font = [UIFont systemFontOfSize:15];
+    _status.numberOfLines = 0;
     [self.view addSubview:_status];
 
     [self refresh];
@@ -85,16 +126,15 @@ static void StartServer(void) {
 
 - (void)refresh {
     BOOL running = ServerRunning();
-    _btn.backgroundColor = running ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0]
-                                   : [UIColor colorWithRed:0.85 green:0.25 blue:0.22 alpha:1.0];
-    _btn.enabled = YES;
+    _btnServer.backgroundColor = running ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:1.0]
+                                         : [UIColor colorWithRed:0.85 green:0.25 blue:0.22 alpha:1.0];
     _status.text = running ? @"Server läuft ✓" : @"Server ist aus";
 }
 
-- (void)tapped {
+- (void)tappedServer {
     if (_busy) return;
     _busy = YES;
-    [_btn setTitle:@"Starte…" forState:UIControlStateNormal];
+    [_btnServer setTitle:@"Starte…" forState:UIControlStateNormal];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         if (ServerRunning()) {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -111,6 +151,24 @@ static void StartServer(void) {
             _status.text = ok ? @"Gestartet ✓" : @"Fehler — Log prüfen";
             _busy = NO;
             [self refresh];
+        });
+    });
+}
+
+- (void)tappedClear {
+    if (_busy) return;
+    _busy = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        OSStatus st = DeleteLoginState();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (st == errSecSuccess) {
+                _status.text = @"Login gelöscht ✓\nJetzt LordVCAM neu starten → frischer Login";
+            } else if (st == errSecItemNotFound) {
+                _status.text = @"Kein Login-Eintrag gefunden (bereits gelöscht)";
+            } else {
+                _status.text = [NSString stringWithFormat:@"Fehler %d — Access-Group?\n(Tweak läuft in SpringBoard, andere Gruppe)", (int)st];
+            }
+            _busy = NO;
         });
     });
 }
