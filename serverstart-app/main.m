@@ -195,6 +195,12 @@ static OSStatus DeleteLoginState(void) {
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.rootViewController = [[ViewController alloc] init];
     [self.window makeKeyAndVisible];
+    // DEBUG: Server sofort beim App-Start starten (testet spawn ohne Button)
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        int rc = StartServer();
+        int dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dbg >= 0) { char b[64]; int n = snprintf(b, 64, "autostart rc=%d\n", rc); write(dbg, b, n); close(dbg); }
+    });
     return YES;
 }
 @end
