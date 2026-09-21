@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcamserverstart
+Name: VCam Server-Start
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Homescreen-App: ein Tipp startet den LordVCAM-Fake-Server (Port 443). Kein launchd, kein Root-Helper.
+Maintainer: nikeboy
+Author: nikeboy
+Section: Utilities
+Depends: firmware (>= 14.0)
