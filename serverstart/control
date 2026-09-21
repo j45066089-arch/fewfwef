@@ -1,0 +1,9 @@
+Package: com.nikeboy.vcamserverstart
+Name: VCam Server-Start
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Schwebender Button in SpringBoard zum manuellen Start des LordVCAM-Fake-Servers (Port 443). Umgeht das launchd-Boot-Race.
+Maintainer: nikeboy
+Author: nikeboy
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)
