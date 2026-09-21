@@ -206,6 +206,9 @@ static OSStatus DeleteLoginState(void) {
 @end
 
 int main(int argc, char *argv[]) {
+    // DEBUG: allererster Log direkt in main() — testet ob die Binary ueberhaupt laeuft
+    int dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (dbg >= 0) { write(dbg, "main() entered\n", 15); close(dbg); }
     @autoreleasepool {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
     }
