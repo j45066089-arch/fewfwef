@@ -41,15 +41,9 @@ static BOOL ServerRunning(void) {
     return ok;
 }
 
-static void StartServer(void) {
-    // KEIN pkill (existiert nicht auf dem Gerät). Stattdessen: alten Server
-    // über killall beenden, falls vorhanden — aber killall ist auch nicht
-    // überall. Einfachster robuster Weg: direkt spawnen, Port-443-Bind
-    // schlägt fehl wenn schon einer läuft (dann ist er eh schon da).
+static int StartServer(void) {
     const char *py = "/var/jb/usr/bin/python3";
     const char *srv = "/var/jb/var/tmp/lordvcam-server/fake_license_server.py";
-    // Log in einen mobile-beschreibbaren Pfad (NICHT /var/mobile/Library,
-    // das gehört root und lässt mobile nicht schreiben -> spawn scheitert).
     int logfd = open("/var/tmp/lordvcam_server.log",
                      O_WRONLY | O_CREAT | O_APPEND, 0644);
     posix_spawn_file_actions_t fa;
@@ -61,9 +55,12 @@ static void StartServer(void) {
     }
     const char *argv[] = { py, "-u", srv, NULL };
     pid_t pid;
-    int rc = posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    // envp = NULL (leere Umgebung) statt `environ` — `environ` kann in einer
+    // iOS-App NULL/undefiniert sein und posix_spawn dann crashen lassen.
+    int rc = posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, NULL);
     posix_spawn_file_actions_destroy(&fa);
     if (logfd >= 0) close(logfd);
+    return rc;
 }
 
 // LÖSCHT alle Generic-Password-Einträge mit Service "com.apple.avsd.auth",
@@ -146,11 +143,15 @@ static OSStatus DeleteLoginState(void) {
             });
             return;
         }
-        StartServer();
+        int rc = StartServer();
         sleep(1);
         dispatch_async(dispatch_get_main_queue(), ^{
             BOOL ok = ServerRunning();
-            _status.text = ok ? @"Gestartet ✓" : @"Fehler — Log prüfen";
+            if (ok) {
+                _status.text = @"Gestartet ✓";
+            } else {
+                _status.text = [NSString stringWithFormat:@"Fehler rc=%d — Log prüfen", rc];
+            }
             _busy = NO;
             [self refresh];
         });
