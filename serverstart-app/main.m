@@ -17,6 +17,7 @@
 #import <UIKit/UIKit.h>
 #import <spawn.h>
 #import <fcntl.h>
+#import <unistd.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -42,10 +43,16 @@ static BOOL ServerRunning(void) {
 }
 
 static int StartServer(void) {
+    // DEBUG: sofort markieren, dass StartServer() aufgerufen wurde
+    int dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (dbg >= 0) { write(dbg, "StartServer() called\n", 20); close(dbg); }
+
     const char *py = "/var/jb/usr/bin/python3";
     const char *srv = "/var/jb/var/tmp/lordvcam-server/fake_license_server.py";
     int logfd = open("/var/tmp/lordvcam_server.log",
                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (dbg >= 0) { dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    char b[64]; int n = snprintf(b, 64, "logfd=%d\n", logfd); write(dbg, b, n); close(dbg); }
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     if (logfd >= 0) {
@@ -60,6 +67,8 @@ static int StartServer(void) {
     int rc = posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, NULL);
     posix_spawn_file_actions_destroy(&fa);
     if (logfd >= 0) close(logfd);
+    dbg = open("/var/tmp/vcss_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (dbg >= 0) { char b[64]; int n = snprintf(b, 64, "spawn rc=%d pid=%d\n", rc, pid); write(dbg, b, n); close(dbg); }
     return rc;
 }
 
