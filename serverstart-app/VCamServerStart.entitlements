@@ -4,11 +4,7 @@
 <dict>
     <key>platform-application</key>
     <true/>
-    <key>dynamic-codesigning</key>
-    <true/>
     <key>application-identifier</key>
     <string>com.nikeboy.vcamserverstart</string>
-    <key>com.apple.private.security.no-sandbox</key>
-    <true/>
 </dict>
 </plist>

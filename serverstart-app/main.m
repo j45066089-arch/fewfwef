@@ -19,6 +19,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <string.h>
+#import <stdio.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -207,14 +208,24 @@ static OSStatus DeleteLoginState(void) {
 @end
 
 int main(int argc, char *argv[]) {
-    // Astra-Test: Log in den App-Container (unabhaengig von /var/tmp sandbox-sicht)
-    // + stderr, damit wir sehen ob main() laeuft.
-    const char *msg = "VCamServerStart main entered\n";
-    write(STDERR_FILENO, msg, strlen(msg));
+    // Astra-Test: REINER POSIX-Marker (kein Foundation/NSString — kann nicht failen).
+    // Schreibt in mehrere Ziele, damit wir sicher sehen wo main() ankommt.
+    int fd = open("/var/tmp/vcss-main-posix.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) { write(fd, "POSIX main entered\n", 19); close(fd); }
+
+    // schreibe in die eigene stderr/stdout (launchd fängt das evtl.)
+    const char *m = "VCAM_MAIN_START\n";
+    write(STDERR_FILENO, m, strlen(m));
+
     @autoreleasepool {
-        NSString *home = NSHomeDirectory();
-        NSString *marker = [home stringByAppendingPathComponent:@"didLaunch.marker"];
-        [@"main() entered\n" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        // Container-Marker via POSIX (NSHomeDirectory ist /var/mobile/Containers/Data/Application/<UUID>)
+        char path[512];
+        snprintf(path, sizeof(path), "%.*s/vcss-launch.marker",
+                (int)(NSHomeDirectory().length < 400 ? NSHomeDirectory().length : 400),
+                NSHomeDirectory().UTF8String);
+        int fd2 = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd2 >= 0) { write(fd2, "didLaunch\n", 10); close(fd2); }
+
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
     }
 }
