@@ -8,6 +8,7 @@ VCamServerStart_FILES := main.m
 VCamServerStart_FRAMEWORKS := UIKit Security
 VCamServerStart_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamServerStart_INSTALL_PATH := /Applications
+VCamServerStart_CODESIGN_FLAGS := -SVCamServerStart.entitlements
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS_MAKE_PATH)/application.mk
