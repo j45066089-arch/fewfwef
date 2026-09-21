@@ -6,7 +6,6 @@ APPLICATION_NAME := VCamServerStart
 
 VCamServerStart_FILES := main.m
 VCamServerStart_FRAMEWORKS := UIKit Security
-VCamServerStart_LIBRARIES := substrate
 VCamServerStart_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamServerStart_INSTALL_PATH := /Applications
 
