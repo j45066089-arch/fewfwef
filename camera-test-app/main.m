@@ -1,5 +1,6 @@
 #include <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreVideo/CoreVideo.h>
 
 // Kamera-Test-App: prüft getrennt Vorschau / VideoDataOutput / Photo / Metadata / Depth.
 // Kein Swappen — nur messen, welcher Ausgang Frames liefert.
@@ -20,7 +21,10 @@
 @property (nonatomic) NSUInteger vdFrames;
 @property (nonatomic) NSUInteger metaCount;
 @property (nonatomic) NSUInteger depthCount;
-@property (nonatomic, copy) NSString *curDevicePos;
+@property (nonatomic, strong) NSString *curDevicePos;
+@property (nonatomic) double vdLuma;        // VideoData-Helligkeit (0..1)
+@property (nonatomic) double vdRed, vdGreen, vdBlue; // VideoData-Farbanteil
+@property (nonatomic, copy) NSString *lastMetaTypes;
 @end
 
 @implementation TestViewController
@@ -133,12 +137,16 @@
         self.status.text = [NSString stringWithFormat:
             @"Ausgänge (getrennt):\n\n"
             @"Vorschau: aktiv (PreviewLayer)\n"
-            @"VideoFrames (videoDataOutput): %lu Frames, %ld conn\n"
+            @"VideoFrames (videoDataOutput): %lu Frames\n"
+            @"  VideoData-Pixel: Lum=%.3f R=%.2f G=%.2f B=%.2f\n"
             @"Foto (photoOutput): bereit\n"
-            @"Metadata (metaOutput): %ld Typen, %lu Objekte\n"
-            @"Depth (depthOutput): verfügbar=%@, %lu Frames",
-            (unsigned long)self.vdFrames, (long)nc,
-            (long)mtypes, (unsigned long)self.metaCount,
+            @"Metadata: %lu Objekte  [%ld Typen]\n"
+            @"  letzte: %@\n"
+            @"Depth: verfügbar=%@, %lu Frames",
+            (unsigned long)self.vdFrames,
+            self.vdLuma, self.vdRed, self.vdGreen, self.vdBlue,
+            (unsigned long)self.metaCount, (long)mtypes,
+            (self.lastMetaTypes ? self.lastMetaTypes : @"-"),
             depthAvail, (unsigned long)self.depthCount];
     });
 }
@@ -148,6 +156,50 @@
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
     self.vdFrames++;
+    // Pixel-Signatur: zentrale Region (1/4) als Durchschnitt Helligkeit + Farbanteil
+    CVImageBufferRef pb = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (pb) {
+        CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        size_t w = CVPixelBufferGetWidth(pb);
+        size_t h = CVPixelBufferGetHeight(pb);
+        OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+        double luma = 0, r = 0, g = 0, b = 0;
+        // NV12 (420v/420f) -> Y-Plane direkt; BGRA (BGRA) -> eigene
+        if (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+            fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+            unsigned char *yPlane = (unsigned char *)CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+            size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+            if (yPlane) {
+                // sample zentrale 8x8 zelle
+                double sum = 0; int cnt = 0;
+                for (size_t yy = h/2 - 4; yy < h/2 + 4; yy++) {
+                    for (size_t xx = w/2 - 4; xx < w/2 + 4; xx++) {
+                        sum += yPlane[yy*yStride + xx]; cnt++;
+                    }
+                }
+                luma = (sum / cnt) / 255.0;
+                r = g = b = luma; // Y-only, chroma weglassen
+            }
+        } else {
+            unsigned char *base = (unsigned char *)CVPixelBufferGetBaseAddress(pb);
+            size_t stride = CVPixelBufferGetBytesPerRow(pb);
+            size_t bpp = 4;
+            if (base) {
+                double sr=0, sg=0, sb=0; int cnt=0;
+                for (size_t yy = h/2 - 4; yy < h/2 + 4; yy++) {
+                    for (size_t xx = w/2 - 4; xx < w/2 + 4; xx++) {
+                        unsigned char *px = base + yy*stride + xx*bpp;
+                        // BGRA little-endian: B,G,R,A
+                        sb += px[0]; sg += px[1]; sr += px[2]; cnt++;
+                    }
+                }
+                r = (sr/cnt)/255.0; g = (sg/cnt)/255.0; b = (sb/cnt)/255.0;
+                luma = 0.299*r + 0.587*g + 0.114*b;
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        self.vdLuma = luma; self.vdRed = r; self.vdGreen = g; self.vdBlue = b;
+    }
 }
 
 #pragma mark - Metadata
@@ -155,6 +207,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 didOutputMetadataObjects:(NSArray<__kindof AVMetadataObject *> *)metadataObjects
        fromConnection:(AVCaptureConnection *)connection {
     self.metaCount += metadataObjects.count;
+    if (metadataObjects.count) {
+        NSMutableSet *s = [NSMutableSet set];
+        for (AVMetadataObject *o in metadataObjects) {
+            [s addObject:o.type];
+        }
+        self.lastMetaTypes = [[s allObjects] componentsJoinedByString:@", "];
+    }
 }
 
 #pragma mark - Depth
