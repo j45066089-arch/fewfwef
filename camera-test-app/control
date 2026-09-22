@@ -1,0 +1,9 @@
+Package: com.nikeboy.cameratest
+Name: CameraTest
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Kamera-Ausgangs-Test (Vorschau/VideoData/Photo/Metadata/Depth getrennt).
+Maintainer: nikeboy
+Author: nikeboy
+Section: Utilities
+Depends: firmware (>= 14.0)
