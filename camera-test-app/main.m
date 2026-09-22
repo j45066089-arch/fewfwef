@@ -7,7 +7,8 @@
 @interface TestViewController : UIViewController
 <AVCaptureVideoDataOutputSampleBufferDelegate,
  AVCaptureMetadataOutputObjectsDelegate,
- AVCaptureDepthDataOutputDelegate>
+ AVCaptureDepthDataOutputDelegate,
+ AVCapturePhotoCaptureDelegate>
 @property (nonatomic, strong) AVCaptureSession *session;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *previewLayer;
 @property (nonatomic, strong) AVCaptureVideoDataOutput *videoOut;
@@ -100,8 +101,6 @@
         [self.session addOutput:self.depthOut];
         dispatch_queue_t dq = dispatch_queue_create("depth", DISPATCH_QUEUE_SERIAL);
         [self.depthOut setDelegate:self callbackQueue:dq];
-        if ([self.depthOut.connections.firstObject isVideoDepthDataEnabled])
-            self.depthOut.connections.firstObject.videoDepthDataEnabled = YES;
     }
 
     [self.session startRunning];
@@ -123,7 +122,7 @@
 
 - (void)takePhoto {
     AVCapturePhotoSettings *s = [AVCapturePhotoSettings photoSettings];
-    [self.photoOut capturePhotoWithSettings:s delegate:nil];
+    [self.photoOut capturePhotoWithSettings:s delegate:(id<AVCapturePhotoCaptureDelegate>)self];
 }
 
 - (void)updateStatus {
