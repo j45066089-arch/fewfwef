@@ -1,0 +1,35 @@
+name: Build CameraTest App
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'camera-test-app/**'
+      - '.github/workflows/build_cameratest_app.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Roothide Theos
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Install packaging dependencies
+        run: brew install ldid dpkg xz
+
+      - name: Build app
+        working-directory: camera-test-app
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cameratest-app-roothide-deb
+          path: camera-test-app/packages/*.deb
+          if-no-files-found: error
